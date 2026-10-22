@@ -1,0 +1,157 @@
+<!DOCTYPE html><html lang="pt-BR"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Perfil da barbearia — CortaKi</title><link rel="stylesheet" href="assets/css/style.css"></head>
+<body><div class="app-shell has-booking-footer"><div id="topbar"></div><main class="page" id="content"></main><div class="booking-footer booking-footer-single"><a class="btn btn-primary" id="shop-booking-cta" href="#shop-services" style="opacity:.45;pointer-events:none" aria-disabled="true">Selecione serviços e profissional</a></div></div>
+<script src="assets/js/mock-data.js"></script><script src="assets/js/app.js"></script><script>
+const base=getShopById(qs('id'))||DEMO_USERS.shop,shop=getShopPublicData(base),catalog=safeStoredJSON('cortaki_shop_catalog',[]),activePosts=getCortakiPosts({authorId:shop.id}),savedTeam=safeStoredJSON('cortaki_shop_barbers',null),rawTeam=Array.isArray(savedTeam)&&savedTeam.length?savedTeam:BARBERS.filter(b=>b.shopId===shop.id),team=rawTeam.map(getBarberPublicData),storedServices=safeStoredJSON('cortaki_shop_services',null),services=Array.isArray(storedServices)&&storedServices.length?storedServices:(shop.services||[]);
+let selectedServiceIds=[],selectedBarberId='';
+renderTopbar({title:shop.name});
+const coverFallback='data:image/svg+xml;utf8,'+encodeURIComponent(`<svg xmlns="http://www.w3.org/2000/svg" width="900" height="300"><defs><linearGradient id="g"><stop stop-color="#5c4226"/><stop offset="1" stop-color="#111116"/></linearGradient></defs><rect width="100%" height="100%" fill="url(#g)"/></svg>`);
+document.getElementById('content').innerHTML=`
+<img src="${shop.coverPhoto||coverFallback}" class="profile-cover" alt="Capa da barbearia" style="margin-bottom:-42px"><div style="display:flex;align-items:end;gap:13px;padding:0 12px"><img src="${shop.photo||avatarFor(shop.id,shop.name)}" class="profile-avatar" alt="${escapeHTML(shop.name)}"><div style="padding-bottom:5px"><h1 class="display" style="font-size:20px">${escapeHTML(shop.name)}</h1><div class="small muted">📍 ${escapeHTML(shop.neighborhood)}</div></div></div>
+<p class="small muted" style="margin-top:16px;line-height:1.6">${escapeHTML(shop.description||'')}</p><div class="card" style="margin-top:15px"><div class="small">📍 ${escapeHTML(shop.address||shop.neighborhood)}</div><div class="small muted" style="margin-top:5px">📞 ${escapeHTML(shop.phone||'Contato não informado')}</div></div>
+<div class="section-title" id="shop-services"><h2>1. Escolha o profissional</h2></div>
+<p class="small muted" style="margin:-8px 0 12px">Selecione o barbeiro para ver os serviços e valores disponíveis com ele.</p>
+<div id="shop-team" style="display:flex;flex-direction:column;gap:9px"></div>
+
+<div class="section-title" id="barber-services-section" style="display:none"><h2>2. Escolha os serviços</h2></div>
+<p id="barber-services-help" class="small muted" style="display:none;margin:-8px 0 12px">Marque um ou mais serviços oferecidos por este profissional.</p>
+<div class="svc-list" id="shop-service-list" style="display:none"></div>
+<div class="svc-total" id="shop-service-total" style="display:none">
+  <span class="muted" id="shop-service-summary"></span>
+  <strong class="mono price" id="shop-price-summary"></strong>
+</div>
+<div id="shop-booking-action" style="margin-top:12px">
+  <a class="btn btn-primary btn-block" id="shop-booking-cta" href="#" style="opacity:.45;pointer-events:none">Selecione um profissional</a>
+</div>
+<div class="section-title"><h2>Posts ativos</h2><span class="small muted">24h</span></div>${activePosts.length?`<div class="profile-posts">${activePosts.map(p=>`<div class="profile-post"><img src="${p.image}" alt="Post da barbearia"><span class="post-expiry">${cortakiPostTimeLeft(p.expiresAt)}</span></div>`).join('')}</div>`:'<div class="card small muted">A barbearia não possui posts ativos agora.</div>'}
+<div class="section-title"><h2>Catálogo de cortes</h2><span class="small muted">Até 10</span></div>${catalog.length?`<div class="catalog-grid">${catalog.slice(0,10).map(x=>`<div class="catalog-item"><img src="${x.image}" alt="${escapeHTML(x.caption||'Trabalho da barbearia')}"><div class="caption">${escapeHTML(x.caption||'Trabalho da equipe')}</div></div>`).join('')}</div>`:'<div class="card small muted">A barbearia ainda não publicou trabalhos no catálogo.</div>'}
+`;
+function eligibleTeam(){return team.filter(b=>b.online)}
+
+function renderTeam(){
+  const available=eligibleTeam();
+  const box=document.getElementById('shop-team');
+
+  if(!available.length){
+    box.innerHTML='<div class="card small muted">Nenhum profissional disponível nesta barbearia no momento.</div>';
+    return;
+  }
+
+  box.innerHTML=available.map(b=>`
+    <button type="button" class="card ${selectedBarberId===b.id?'selected':''}" data-barber-id="${b.id}"
+      style="display:flex;align-items:center;gap:11px;text-align:left;width:100%;cursor:pointer">
+      <img src="${b.photo||avatarFor(b.id,b.name)}"
+        style="width:48px;height:48px;border-radius:13px;object-fit:cover"
+        alt="${escapeHTML(b.name)}">
+      <span style="flex:1">
+        <strong>${escapeHTML(b.name)}</strong>
+        <span class="small muted" style="display:block">${starIcons(b.rating)} ${b.rating} · Disponível</span>
+      </span>
+      <span class="badge ${selectedBarberId===b.id?'badge-success':''}">
+        ${selectedBarberId===b.id?'Selecionado':'Selecionar'}
+      </span>
+    </button>
+  `).join('');
+
+  box.querySelectorAll('[data-barber-id]').forEach(btn=>{
+    btn.onclick=()=>{
+      selectedBarberId=btn.dataset.barberId;
+      selectedServiceIds=[];
+      renderTeam();
+      renderBarberServices();
+      updateCTA();
+      document.getElementById('barber-services-section').scrollIntoView({behavior:'smooth',block:'start'});
+    };
+  });
+}
+
+function renderBarberServices(){
+  const section=document.getElementById('barber-services-section');
+  const help=document.getElementById('barber-services-help');
+  const list=document.getElementById('shop-service-list');
+
+  if(!selectedBarberId){
+    section.style.display='none';
+    help.style.display='none';
+    list.style.display='none';
+    list.innerHTML='';
+    document.getElementById('shop-service-total').style.display='none';
+    return;
+  }
+
+  const barber=getBarberById(selectedBarberId);
+  const services=barber ? barber.services : [];
+
+  section.style.display='block';
+  help.style.display='block';
+  list.style.display='block';
+
+  if(!services.length){
+    list.innerHTML='<div class="card small muted">Este profissional ainda não possui serviços cadastrados.</div>';
+    document.getElementById('shop-service-total').style.display='none';
+    return;
+  }
+
+  list.innerHTML=services.map(s=>`
+    <div class="svc-row ${selectedServiceIds.includes(s.id)?'selected':''}"
+      data-service-id="${s.id}" role="checkbox"
+      aria-checked="${selectedServiceIds.includes(s.id)?'true':'false'}" tabindex="0">
+      <div class="box">${appIcon('check')}</div>
+      <div class="info">
+        <div class="n icon-label">${appIcon(s.icon)} ${escapeHTML(s.name)}</div>
+        <div class="d">${s.durationMin} min</div>
+      </div>
+      <span class="mono price">${formatBRL(s.price)}</span>
+    </div>
+  `).join('');
+
+  list.querySelectorAll('.svc-row').forEach(row=>{
+    row.onclick=()=>toggleService(row);
+    row.onkeydown=event=>{
+      if(event.key==='Enter'||event.key===' '){
+        event.preventDefault();
+        toggleService(row);
+      }
+    };
+  });
+}
+
+function updateCTA(){
+  const barber=selectedBarberId ? getBarberById(selectedBarberId) : null;
+  const chosen=barber ? barber.services.filter(s=>selectedServiceIds.includes(s.id)) : [];
+  const total=chosen.reduce((n,s)=>n+Number(s.price),0);
+  const minutes=chosen.reduce((n,s)=>n+Number(s.durationMin),0);
+  const summary=document.getElementById('shop-service-total');
+  const cta=document.getElementById('shop-booking-cta');
+
+  summary.style.display=chosen.length?'flex':'none';
+  document.getElementById('shop-service-summary').textContent=`${chosen.length} serviço(s) · ${minutes} min`;
+  document.getElementById('shop-price-summary').textContent=formatBRL(total);
+
+  const ready=Boolean(barber&&chosen.length);
+  cta.textContent=ready?`Agendar na barbearia · ${formatBRL(total)}`:
+    (barber?'Selecione ao menos um serviço':'Selecione um profissional');
+  cta.href=ready
+    ? `agendar.html?origem=barbearia&barbearia=${shop.id}&barbeiro=${barber.id}&servicos=${selectedServiceIds.join(',')}`
+    : '#shop-services';
+  cta.style.opacity=ready?'1':'.45';
+  cta.style.pointerEvents=ready?'auto':'none';
+  cta.setAttribute('aria-disabled',ready?'false':'true');
+}
+
+function toggleService(row){
+  const id=row.dataset.serviceId;
+  selectedServiceIds=selectedServiceIds.includes(id)
+    ? selectedServiceIds.filter(x=>x!==id)
+    : [...selectedServiceIds,id];
+
+  row.classList.toggle('selected',selectedServiceIds.includes(id));
+  row.setAttribute('aria-checked',selectedServiceIds.includes(id)?'true':'false');
+  updateCTA();
+}
+
+renderTeam();
+renderBarberServices();
+updateCTA();
+
+document.querySelectorAll('.profile-post img').forEach(img=>img.onclick=()=>openPostViewer(img.src,img.alt));renderTeam();
+</script></body></html>

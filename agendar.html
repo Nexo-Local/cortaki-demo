@@ -1,0 +1,446 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Agendar — Navalha</title>
+<link rel="stylesheet" href="assets/css/style.css">
+</head>
+<body>
+<div class="app-shell has-booking-footer">
+  <div id="topbar"></div>
+
+  <div class="page">
+    <div style="display:flex; gap:6px; margin-bottom: 18px;" id="stepper"></div>
+    <div id="step-content"></div>
+  </div>
+
+  <div class="booking-footer">
+    <button class="btn btn-secondary" id="btn-back" style="flex:0 0 auto;">Voltar</button>
+    <button class="btn btn-primary btn-block" id="btn-next">Continuar</button>
+  </div>
+</div>
+
+<script src="assets/js/mock-data.js"></script>
+<script src="assets/js/app.js"></script>
+<script src="assets/js/cortaki-api.js"></script>
+<script>
+  const barber = getBarberById(qs('barbeiro')) || BARBERS[0];
+  const shopBooking = qs('origem') === 'barbearia' && Boolean(qs('barbearia'));
+  const shop = shopBooking ? getShopById(qs('barbearia')) : (barber.shopId ? getShopById(barber.shopId) : null);
+  const shopAddress = shop ? (shop.address || `${shop.name} — ${shop.neighborhood}`) : '';
+  renderTopbar({ title: 'Agendar atendimento' });
+
+  const STORAGE_KEYS = {
+    addresses: 'navalha_customer_addresses',
+    balance: 'navalha_customer_balance',
+    appointments: 'navalha_appointments',
+    notifications: 'navalha_customer_notifications',
+    blockedSlots: 'navalha_barber_blocked_slots'
+  };
+
+  function generateSecurityCode() {
+    if (window.crypto?.getRandomValues) { const a = new Uint32Array(1); crypto.getRandomValues(a); return String(100000 + (a[0] % 900000)); }
+    return '000000'; // apenas fallback visual; produção usa o servidor.
+  }
+
+  function addCustomerNotification(message, type, appointmentId) {
+    let notifications = [];
+    try { notifications = JSON.parse(localStorage.getItem(STORAGE_KEYS.notifications) || '[]'); } catch {}
+    if (!Array.isArray(notifications)) notifications = [];
+    notifications.unshift({ id: `notice-${Date.now()}`, customerId: DEMO_USERS.customer.id, appointmentId, type, message, createdAt: new Date().toISOString(), read: false });
+    localStorage.setItem(STORAGE_KEYS.notifications, JSON.stringify(notifications));
+  }
+
+  function getBlockedSlots(key) {
+    try {
+      const blocked = JSON.parse(localStorage.getItem(STORAGE_KEYS.blockedSlots) || '{}');
+      return new Set(Array.isArray(blocked[key]) ? blocked[key] : []);
+    } catch { return new Set(); }
+  }
+
+  function availableSlotsForDate(dateObj) {
+    const blocked = getBlockedSlots(dateKey(dateObj));
+    return getDaySlots(barber, dateObj).map(slot => ({ ...slot, available: slot.available && !blocked.has(slot.time) }));
+  }
+
+  function getSavedAddresses() {
+    try {
+      const saved = JSON.parse(localStorage.getItem(STORAGE_KEYS.addresses) || '[]');
+      if (Array.isArray(saved) && saved.length) return saved;
+    } catch {}
+
+    return DEMO_USERS.customer.address ? [{
+      label: 'Principal', text: DEMO_USERS.customer.address, complement: ''
+    }] : [];
+  }
+
+  function fullAddress(address) {
+    return [address.text, address.complement].filter(Boolean).join(' — ');
+  }
+
+  function getBalance() {
+    return Number(localStorage.getItem(STORAGE_KEYS.balance) || 0);
+  }
+
+  function saveBalance(value) {
+    localStorage.setItem(STORAGE_KEYS.balance, String(Math.max(0, value)));
+  }
+
+  function saveAppointment(appointment) {
+    let saved = [];
+    try { saved = JSON.parse(localStorage.getItem(STORAGE_KEYS.appointments) || '[]'); } catch {}
+    if (!Array.isArray(saved)) saved = [];
+    saved.push(appointment);
+    localStorage.setItem(STORAGE_KEYS.appointments, JSON.stringify(saved));
+  }
+
+  const STEPS = shopBooking ? ['Serviços', 'Data', 'Pagamento'] : ['Serviços', 'Local', 'Data', 'Pagamento'];
+  const CALENDAR_STEP = shopBooking ? 1 : 2;
+  const PAYMENT_STEP = shopBooking ? 2 : 3;
+  let step = 0;
+  const requestedServiceIds = (qs('servicos') || qs('servico') || '')
+    .split(',')
+    .map(id => id.trim())
+    .filter(id => barber.services.some(service => service.id === id));
+  let draft = {
+    barberId: barber.id, barberName: barber.name,
+    serviceIds: [...new Set(requestedServiceIds)], type: shopBooking ? 'barbearia' : null, address: shopBooking ? shopAddress : '',
+    calYear: new Date().getFullYear(), calMonth: new Date().getMonth(),
+    selectedDateKey: null, selectedDateLabel: null, time: null,
+    payMethod: null, mode: 'agendado',
+  };
+
+  function selectedServices() { return barber.services.filter(s => draft.serviceIds.includes(s.id)); }
+  function totalPrice() { return selectedServices().reduce((s, x) => s + x.price, 0); }
+  function totalMinutes() { return selectedServices().reduce((s, x) => s + x.durationMin, 0); }
+
+  function renderStepper() {
+    document.getElementById('stepper').innerHTML = STEPS.map((label, i) => `
+      <div style="flex:1; height:4px; border-radius:4px; background:${i <= step ? 'var(--gold)' : 'var(--border)'};"></div>
+    `).join('');
+  }
+
+  function renderStep() {
+    renderStepper();
+    const el = document.getElementById('step-content');
+    document.getElementById('btn-back').style.visibility = step === 0 ? 'hidden' : 'visible';
+
+    if (step === 0) {
+      el.innerHTML = `
+        <h2 style="margin-bottom:4px;">Escolha os serviços</h2>
+        <p class="small muted" style="margin-bottom:14px;">Pode marcar mais de um — o preço e o tempo somam automaticamente.</p>
+        <div class="svc-list" id="svc-list">
+          ${barber.services.map(s => `
+            <div class="svc-row ${draft.serviceIds.includes(s.id) ? 'selected' : ''}" data-id="${s.id}">
+              <div class="box">${appIcon('check')}</div>
+              <div class="info">
+                <div class="n icon-label">${appIcon(s.icon)} ${s.name}</div>
+                <div class="d">${s.durationMin} min</div>
+              </div>
+              <div class="price mono">${formatBRL(s.price)}</div>
+            </div>
+          `).join('')}
+        </div>
+        <div class="svc-total" id="svc-total" style="display:${draft.serviceIds.length ? 'flex' : 'none'};">
+          <span class="muted">${draft.serviceIds.length} serviço(s) · ${totalMinutes()} min</span>
+          <span class="mono price" style="color:var(--gold-bright); font-size:15px;">${formatBRL(totalPrice())}</span>
+        </div>
+      `;
+      document.querySelectorAll('#svc-list .svc-row').forEach((row) => {
+        row.addEventListener('click', () => {
+          const id = row.dataset.id;
+          const idx = draft.serviceIds.indexOf(id);
+          if (idx === -1) draft.serviceIds.push(id); else draft.serviceIds.splice(idx, 1);
+          renderStep();
+        });
+      });
+    }
+
+    if (step === 1 && !shopBooking) {
+      const options = [];
+      if (barber.attendsHome) options.push({ value: 'domicilio', icon: 'home', label: 'Na minha casa' });
+      if (barber.attendsShop) options.push({ value: 'barbearia', icon: 'barber', label: 'Na barbearia' });
+      const savedAddresses = getSavedAddresses();
+      el.innerHTML = `
+        <h2 style="margin-bottom:14px;">Onde você quer ser atendido?</h2>
+        <div class="chip-group" id="type-chips">
+          ${options.map(o => `<div class="chip icon-label ${draft.type === o.value ? 'selected' : ''}" data-value="${o.value}">${appIcon(o.icon)} ${o.label}</div>`).join('')}
+        </div>
+        <div id="choice-details" class="choice-details">
+          ${draft.type === 'domicilio' ? `
+            <div class="card">
+              <strong class="icon-label">${appIcon('pin')} Endereço do atendimento</strong>
+              <p class="small muted" style="margin:6px 0 12px;">Pesquise um endereço ou escolha um local salvo no seu perfil.</p>
+              ${savedAddresses.length ? `<div class="chip-group" id="saved-addresses" style="margin-bottom:12px;">${savedAddresses.map((address,index) => {
+                const value = fullAddress(address);
+                return `<div class="chip icon-label ${draft.address === value ? 'selected' : ''}" data-index="${index}">${appIcon('pin')} ${address.label || 'Endereço'}</div>`;
+              }).join('')}</div>` : '<p class="small muted">Você ainda não possui endereços salvos.</p>'}
+              <div class="field" style="margin-bottom:0;"><label for="address-input">Pesquisar ou informar endereço</label><input type="search" id="address-input" placeholder="Rua, número, bairro e cidade" value="${draft.address}"></div>
+            </div>
+          ` : draft.type === 'barbearia' ? `
+            <div class="card" style="border-color:var(--gold-dim);">
+              <div class="icon-label">${appIcon('shop','app-icon-lg')}<div><strong style="display:block;">${shop ? shop.name : 'Barbearia'}</strong><span class="small muted">${shop?.description || 'Local de atendimento deste profissional.'}</span></div></div>
+              <div class="shop-info-grid">
+                <div class="shop-info-row">${appIcon('pin')}<span><strong>Endereço</strong><br>${shopAddress || 'Não cadastrado'}</span></div>
+                <div class="shop-info-row">${appIcon('phone')}<span><strong>Contato</strong><br>${shop?.phone || 'Não informado'}</span></div>
+                <div class="shop-info-row">${appIcon('pin')}<span><strong>Bairro e distância</strong><br>${shop?.neighborhood || 'Não informado'}${shop?.distanceKm ? ` · ${shop.distanceKm} km` : ''}</span></div>
+                <div class="shop-info-row">${appIcon('users')}<span><strong>Profissional</strong><br>${barber.name} · ${starString(barber.rating)} ${barber.rating} (${barber.reviewCount} avaliações)</span></div>
+              </div>
+              ${shop ? `<a class="btn btn-secondary btn-block" href="barbearia.html?id=${shop.id}" style="margin-top:14px;">Ver perfil completo da barbearia</a>` : ''}
+            </div>
+          ` : '<p class="small muted">Selecione uma modalidade para ver as opções do local.</p>'}
+        </div>
+      `;
+      document.querySelectorAll('#type-chips .chip').forEach((chip) => {
+        chip.classList.toggle('selected', chip.dataset.value === draft.type);
+        chip.addEventListener('click', () => {
+          draft.type = chip.dataset.value;
+          draft.address = draft.type === 'barbearia' ? shopAddress : '';
+          renderStep();
+        });
+      });
+      document.getElementById('address-input')?.addEventListener('input', (event) => {
+        draft.address = event.target.value;
+        document.querySelectorAll('#saved-addresses .chip').forEach(chip => chip.classList.remove('selected'));
+      });
+      document.querySelectorAll('#saved-addresses .chip').forEach(chip => chip.addEventListener('click', () => {
+        draft.address = fullAddress(savedAddresses[Number(chip.dataset.index)]);
+        renderStep();
+      }));
+    }
+
+    if (step === CALENDAR_STEP) {
+      renderCalendarStep(el);
+    }
+
+    if (step === PAYMENT_STEP) {
+      renderPaymentStep(el);
+    }
+  }
+
+  function renderCalendarStep(el) {
+    const weeks = buildMonthMatrix(draft.calYear, draft.calMonth);
+    const monthLabel = `${MONTH_NAMES[draft.calMonth]} de ${draft.calYear}`;
+    const now = new Date(); now.setDate(1); now.setHours(0,0,0,0);
+    const atMin = draft.calYear === now.getFullYear() && draft.calMonth === now.getMonth();
+    const maxMonths = new Date(now.getFullYear(), now.getMonth() + 3, 1);
+    const atMax = new Date(draft.calYear, draft.calMonth, 1) >= maxMonths;
+
+    el.innerHTML = `
+      <h2 style="margin-bottom:4px;">Escolha data e horário</h2>
+      <p class="small muted" style="margin-bottom:14px;">Calendário completo — todo dia com bolinha tem horários livres.</p>
+      <div class="cal-month-nav">
+        <button id="cal-prev" aria-label="Mês anterior" ${atMin ? 'disabled style="opacity:.3;"' : ''}>${appIcon('back')}</button>
+        <div class="lbl" style="text-transform:capitalize;">${monthLabel}</div>
+        <button id="cal-next" aria-label="Próximo mês" ${atMax ? 'disabled style="opacity:.3;"' : ''}>${appIcon('back','calendar-next-icon')}</button>
+      </div>
+      <div class="cal-grid">
+        ${DOW_LABELS.map(d => `<div class="cal-dow">${d}</div>`).join('')}
+        ${weeks.flat().map(d => {
+          if (!d) return `<div class="cal-day empty"></div>`;
+          const key = dateKey(d);
+          const past = isPastDay(d);
+          const hasSlots = !past && dayHasAvailability(barber, d) && availableSlotsForDate(d).some(slot => slot.available);
+          const cls = ['cal-day'];
+          if (past) cls.push('past');
+          else if (!hasSlots) cls.push('no-slots');
+          else cls.push('has-slots');
+          if (key === draft.selectedDateKey) cls.push('selected');
+          const isToday = key === dateKey(new Date());
+          if (isToday) cls.push('today');
+          return `<div class="${cls.join(' ')}" data-key="${key}" ${hasSlots ? '' : 'data-disabled="1"'}>${d.getDate()}${hasSlots ? '<div class="dot"></div>' : ''}</div>`;
+        }).join('')}
+      </div>
+      <div id="day-slots" style="margin-top:20px;"></div>
+    `;
+
+    document.getElementById('cal-prev').addEventListener('click', () => {
+      if (atMin) return;
+      draft.calMonth--; if (draft.calMonth < 0) { draft.calMonth = 11; draft.calYear--; }
+      renderStep();
+    });
+    document.getElementById('cal-next').addEventListener('click', () => {
+      if (atMax) return;
+      draft.calMonth++; if (draft.calMonth > 11) { draft.calMonth = 0; draft.calYear++; }
+      renderStep();
+    });
+    document.querySelectorAll('.cal-day[data-key]:not([data-disabled])').forEach((cell) => {
+      cell.addEventListener('click', () => {
+        draft.selectedDateKey = cell.dataset.key;
+        const [y, m, d] = cell.dataset.key.split('-').map(Number);
+        draft.selectedDateObj = new Date(y, m - 1, d);
+        draft.selectedDateLabel = formatDateLabel(draft.selectedDateObj);
+        draft.time = null;
+        renderStep();
+      });
+    });
+
+    if (draft.selectedDateKey) {
+      const [y, m, d] = draft.selectedDateKey.split('-').map(Number);
+      const dateObj = new Date(y, m - 1, d);
+      const slots = availableSlotsForDate(dateObj);
+      document.getElementById('day-slots').innerHTML = `
+        <div style="font-size:13px; color:var(--text-muted); margin-bottom:8px; text-transform:capitalize;">${formatDateLabel(dateObj)} — todos os horários</div>
+        <div class="slot-grid">
+          ${slots.map(s => `<div class="slot ${s.available ? '' : 'unavailable'} ${draft.time === s.time ? 'selected' : ''}" data-time="${s.time}">${s.time}</div>`).join('')}
+        </div>
+      `;
+      document.querySelectorAll('#day-slots .slot:not(.unavailable)').forEach((slot) => {
+        slot.addEventListener('click', () => {
+          draft.time = slot.dataset.time;
+          document.querySelectorAll('#day-slots .slot').forEach(s => s.classList.remove('selected'));
+          slot.classList.add('selected');
+        });
+      });
+    }
+  }
+
+  function renderPaymentStep(el) {
+    const service = selectedServices();
+    el.innerHTML = `
+      <h2 style="margin-bottom:4px;">Pagamento</h2>
+      <p class="small muted" style="margin-bottom:14px;">O agendamento é confirmado com o pagamento antecipado — sem cobrança na hora do corte.</p>
+      ${shopBooking ? `<div class="card" style="margin-bottom:12px;border-color:var(--gold-dim)"><strong>${shop.name}</strong><div class="small muted" style="margin-top:5px">${shopAddress}<br>Profissional: ${barber.name}</div></div>` : ''}
+      <div class="card" style="margin-bottom:16px;">
+        ${service.map(s => `<div class="ticket-row"><span class="label icon-label">${appIcon(s.icon)} ${s.name}</span><span class="mono">${formatBRL(s.price)}</span></div>`).join('')}
+        <hr class="divider">
+        <div class="ticket-row"><span class="label">Total a pagar</span><span class="mono price" style="color:var(--gold-bright); font-size:16px;">${formatBRL(totalPrice())}</span></div>
+      </div>
+      <div class="card" style="margin-bottom:16px; border-color:var(--gold-dim);">
+        <div style="font-weight:700; margin-bottom:7px;">🛡️ CortaKi Protege</div>
+        <div class="small muted" style="line-height:1.55;">
+          • Cliente e barbeiro fazem check-in próximo ao horário.<br>
+          • O código de 6 dígitos confirma o início do serviço.<br>
+          • Se o barbeiro registrar presença e o cliente faltar até o fim do dia, o valor é dividido: 50% para cada.<br>
+          • Se somente o cliente registrar presença, ele recebe reembolso integral.<br>
+          • Sem provas suficientes ou em caso de contestação, o pagamento permanece retido para análise.
+        </div>
+      </div>
+      <div class="chip-group" id="pay-chips" style="margin-bottom:16px;">
+        <div class="chip icon-label" data-value="Pix">${appIcon('pix')} Pix</div>
+        <div class="chip icon-label" data-value="Cartão">${appIcon('card')} Cartão de crédito</div>
+        <div class="chip icon-label" data-value="Saldo">${appIcon('money')} Saldo</div>
+      </div>
+      <div id="pay-detail"></div>
+    `;
+    document.querySelectorAll('#pay-chips .chip').forEach((chip) => {
+      chip.classList.toggle('selected', chip.dataset.value === draft.payMethod);
+      chip.addEventListener('click', () => {
+        draft.payMethod = chip.dataset.value;
+        document.querySelectorAll('#pay-chips .chip').forEach(c => c.classList.remove('selected'));
+        chip.classList.add('selected');
+        renderPayDetail();
+      });
+    });
+    renderPayDetail();
+
+    function renderPayDetail() {
+      const box = document.getElementById('pay-detail');
+      if (draft.payMethod === 'Pix') {
+        box.innerHTML = `<div class="card" style="text-align:center;"><div style="font-size:13px; color:var(--text-muted); margin-bottom:8px;">QR Code simulado</div><div style="width:120px; height:120px; margin:0 auto; border-radius:10px; background:repeating-conic-gradient(var(--surface-3) 0% 25%, var(--surface-2) 0% 50%) 0 0/16px 16px;"></div></div>`;
+      } else if (draft.payMethod === 'Cartão') {
+        box.innerHTML = `
+          <div class="field"><label>Número do cartão</label><input type="text" placeholder="0000 0000 0000 0000"></div>
+          <div style="display:flex; gap:10px;">
+            <div class="field" style="flex:1;"><label>Validade</label><input type="text" placeholder="MM/AA"></div>
+            <div class="field" style="flex:1;"><label>CVV</label><input type="text" placeholder="123"></div>
+          </div>
+        `;
+      } else if (draft.payMethod === 'Saldo') {
+        const balance = getBalance();
+        const enough = balance >= totalPrice();
+        box.innerHTML = `
+          <div class="card">
+            <div class="ticket-row">
+              <span class="label">Saldo disponível</span>
+              <span class="mono" style="color:${enough ? 'var(--success)' : 'var(--danger)'};">${formatBRL(balance)}</span>
+            </div>
+            <div class="ticket-row">
+              <span class="label">Valor do agendamento</span>
+              <span class="mono">${formatBRL(totalPrice())}</span>
+            </div>
+            <hr class="divider">
+            <div class="small" style="color:${enough ? 'var(--success)' : 'var(--danger)'};">
+              ${enough
+                ? `✓ Saldo suficiente. Restará ${formatBRL(balance - totalPrice())}.`
+                : `Saldo insuficiente. Faltam ${formatBRL(totalPrice() - balance)}. Carregue saldo no Perfil.`}
+            </div>
+          </div>
+        `;
+      } else box.innerHTML = '';
+    }
+  }
+
+  function canAdvance() {
+    if (step === 0) return draft.serviceIds.length > 0;
+    if (!shopBooking && step === 1) return draft.type === 'barbearia' ? Boolean(shopAddress) : draft.type === 'domicilio' && draft.address.trim().length > 2;
+    if (step === CALENDAR_STEP) return !!draft.time;
+    if (step === PAYMENT_STEP) {
+      if (!draft.payMethod) return false;
+      if (draft.payMethod === 'Saldo') return getBalance() >= totalPrice();
+      return true;
+    }
+    return true;
+  }
+
+  document.getElementById('btn-next').addEventListener('click', async () => {
+    if (!canAdvance()) {
+      if (step === PAYMENT_STEP && draft.payMethod === 'Saldo' && getBalance() < totalPrice()) {
+        alert('Saldo insuficiente. Carregue saldo no seu perfil ou escolha outra forma de pagamento.');
+      } else {
+        alert('Preencha esta etapa para continuar.');
+      }
+      return;
+    }
+    if (step === STEPS.length - 1) {
+      const services = selectedServices();
+      const booking = { ...draft, serviceNames: services.map(s => s.name), totalPrice: totalPrice(), dayLabel: draft.selectedDateLabel };
+      // Em localhost, a criação real passa pelo backend endurecido. O navegador não define preço, saldo, status ou código.
+      if (window.CORTAKI_API && (location.hostname === '127.0.0.1' || location.hostname === 'localhost')) {
+        const scheduledAt = draft.selectedDateKey && draft.time ? new Date(`${draft.selectedDateKey}T${draft.time}:00`).toISOString() : null;
+        try {
+          const created = await CORTAKI_API.createAppointment({
+            barberId: barber.id, shopId: shop?.id || null, serviceIds: draft.serviceIds, mode: 'SCHEDULED',
+            scheduledAt, address: draft.type === 'domicilio' ? draft.address : (shopAddress || null), idempotencyKey: crypto.randomUUID()
+          });
+          // Pagamento real será conectado ao PSP quando o fornecedor existir. No ambiente local, este endpoint é explicitamente simulado.
+          await CORTAKI_API.simulatePayment(created.appointmentId);
+          BookingDraft.set({ ...booking, appointmentId: created.appointmentId, securityCode: created.securityCode, secureBackend: true });
+          window.location.href = `confirmacao.html?id=${encodeURIComponent(created.appointmentId)}`;
+          return;
+        } catch (error) {
+          console.error(error);
+          alert(error?.data?.error || error.message || 'Não foi possível criar o agendamento.');
+          return;
+        }
+      }
+      // Fallback visual fora do servidor local. Não representa produção.
+      if (draft.payMethod === 'Saldo') {
+        const balance = getBalance();
+        if (balance < totalPrice()) { alert('Saldo insuficiente.'); return; }
+        saveBalance(balance - totalPrice());
+      }
+      const appointment = { id: `apt-${crypto.randomUUID?.() || Date.now()}`, customerId: DEMO_USERS.customer.id, customerName: DEMO_USERS.customer.name, barberId: barber.id, barberName: barber.name, shopId: shop?.id || null, shopName: shop?.name || null, serviceNames: booking.serviceNames, type: draft.type, address: draft.address, date: draft.selectedDateLabel, dateKey: draft.selectedDateKey, time: draft.time, price: totalPrice(), mode: 'agendado', status: 'Solicitado', securityCode: generateSecurityCode(), securityVerified: false, securityPolicyVersion: 'cortaki-protege-v1', security: { customerCheckIn: null, barberCheckIn: null, failedCodeAttempts: 0, codeLockedUntil: null, dispute: null }, settlement: { status: 'Retido', barberAmount: 0, customerRefund: 0 }, createdAt: new Date().toISOString(), payment: { method: draft.payMethod, status: 'Pago e retido' } };
+      saveAppointment(appointment);
+      BookingDraft.set({ ...booking, appointmentId: appointment.id, securityCode: appointment.securityCode });
+      window.location.href = 'confirmacao.html';
+      return;
+    }
+    step++;
+    document.getElementById('btn-next').textContent = step === STEPS.length - 1 ? 'Pagar e agendar' : 'Continuar';
+    renderStep();
+    window.scrollTo(0, 0);
+  });
+
+  document.getElementById('btn-back').addEventListener('click', () => {
+    if (step === 0) return;
+    step--;
+    document.getElementById('btn-next').textContent = 'Continuar';
+    renderStep();
+  });
+
+  renderStep();
+</script>
+</body>
+</html>

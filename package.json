@@ -1,0 +1,12 @@
+{
+  "name": "cortaki-hardened-v10",
+  "version": "10.0.0-security-foundation",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node server.mjs",
+    "dev": "node server.mjs",
+    "test:security": "node tests/security-tests.mjs"
+  },
+  "engines": { "node": ">=22.0.0" }
+}

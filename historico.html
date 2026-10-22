@@ -1,0 +1,226 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Meus agendamentos — Navalha</title>
+<link rel="stylesheet" href="assets/css/style.css">
+</head>
+<body>
+<div class="app-shell">
+  <div id="topbar"></div>
+  <div class="page">
+    <h1 style="font-size:20px; margin-bottom: 4px;">Meus agendamentos</h1>
+    <p style="color:var(--text-muted); font-size:13px; margin-bottom:16px;" id="logged-as"></p>
+
+    <div class="chip-group" id="tab-filter" style="margin-bottom:16px;">
+      <div class="chip selected" data-value="ativos">Ativos</div>
+      <div class="chip" data-value="concluidos">Concluídos</div>
+      <div class="chip" data-value="cancelados">Cancelados</div>
+    </div>
+
+    <div id="list" style="display:flex; flex-direction:column; gap:12px;"></div>
+
+  </div>
+  
+</div>
+
+<script src="assets/js/mock-data.js"></script>
+<script src="assets/js/app.js"></script>
+<script>
+  renderTopbar({ title: 'Meus agendamentos'});
+  renderBottomNav('historico');
+
+  const me = DEMO_USERS.customer;
+  document.getElementById('logged-as').innerHTML = `Logado como <strong>${me.name}</strong> (Cliente Demo)`;
+
+  const APPOINTMENTS_KEY = 'navalha_appointments';
+  const CHAT_KEY = 'navalha_appointment_chats';
+
+  function getSavedAppointments() {
+    try {
+      const saved = JSON.parse(localStorage.getItem(APPOINTMENTS_KEY) || '[]');
+      return Array.isArray(saved) ? saved : [];
+    } catch { return []; }
+  }
+
+  function allMyAppointments() {
+    const merged = [...getSavedAppointments(), ...APPOINTMENTS];
+    return merged.filter((appointment, index) =>
+      appointment.customerId === me.id && merged.findIndex(item => item.id === appointment.id) === index
+    );
+  }
+
+  function getChats() {
+    try { return JSON.parse(localStorage.getItem(CHAT_KEY) || '{}'); } catch { return {}; }
+  }
+
+  function sendMessage(id) {
+    const input = document.getElementById(`chat-input-${id}`);
+    const text = input.value.trim();
+    if (!text) return;
+    const chats = getChats();
+    if (!Array.isArray(chats[id])) chats[id] = [];
+    chats[id].push({ from: 'customer', text, at: new Date().toISOString() });
+    localStorage.setItem(CHAT_KEY, JSON.stringify(chats));
+    render();
+    setTimeout(() => document.getElementById(`chat-${id}`)?.scrollIntoView({ behavior: 'smooth', block: 'nearest' }), 0);
+  }
+
+  function toggleChat(id) {
+    const chat = document.getElementById(`chat-${id}`);
+    chat.style.display = chat.style.display === 'none' ? 'block' : 'none';
+  }
+
+  function toggleDetails(id) {
+    const details = document.getElementById(`details-${id}`);
+    details.style.display = details.style.display === 'none' ? 'block' : 'none';
+  }
+
+  function customerCheckIn(id) {
+    const appointment = allMyAppointments().find(item => item.id === id);
+    if (!appointment) return;
+    const result = recordPresenceCheckIn(appointment, 'customer');
+    alert(result.message);
+    render();
+  }
+
+  async function reportSecurityProblem(id) {
+    const appointment = allMyAppointments().find(item => item.id === id);
+    if (!appointment) return;
+    const reason = await showAppPrompt('Descreva o ocorrido. O pagamento ficará protegido enquanto o caso for analisado:', '', { title: 'Abrir contestação' });
+    if (!reason?.trim()) return;
+    openAppointmentDispute(appointment, 'customer', reason.trim());
+    alert('Contestação registrada. O valor permanecerá retido para análise.');
+    render();
+  }
+
+  let tab = 'ativos';
+
+  document.querySelectorAll('#tab-filter .chip').forEach((chip) => {
+    chip.addEventListener('click', () => {
+      document.querySelectorAll('#tab-filter .chip').forEach(c => c.classList.remove('selected'));
+      chip.classList.add('selected');
+      tab = chip.dataset.value;
+      render();
+    });
+  });
+
+  async function cancelAppointment(id) {
+    const apt = allMyAppointments().find(a => a.id === id);
+    if (apt && (apt.securityVerified || apt.security?.customerCheckIn?.at || apt.security?.barberCheckIn?.at)) {
+      reportSecurityProblem(id);
+      return;
+    }
+    if (apt && await showAppConfirm('Deseja cancelar este agendamento? O valor pago será estornado.', { title: 'Cancelar agendamento' })) {
+      apt.status = 'Cancelado';
+      apt.payment.status = 'Reembolsado';
+      const saved = getSavedAppointments();
+      const stored = saved.find(a => a.id === id);
+      if (stored) {
+        stored.status = apt.status;
+        stored.payment = apt.payment;
+        localStorage.setItem(APPOINTMENTS_KEY, JSON.stringify(saved));
+      }
+      render();
+    }
+  }
+
+  async function rateAppointment(id) {
+    const apt = allMyAppointments().find(a => a.id === id);
+    if (!apt) return;
+    const review = await showAppRating({
+      title: `Avaliar ${apt.barberName}`,
+      message: 'Selecione as estrelas e conte como foi o atendimento.',
+      initialRating: apt.rating || 0,
+      initialComment: apt.ratingComment || ''
+    });
+    if (!review) return;
+    apt.rating = review.rating;
+    apt.ratingComment = review.comment;
+    apt.ratedAt = new Date().toISOString();
+    const saved = getSavedAppointments();
+    const index = saved.findIndex(item => item.id === id);
+    if (index >= 0) saved[index] = { ...saved[index], rating: apt.rating, ratingComment: apt.ratingComment, ratedAt: apt.ratedAt };
+    else saved.push({ ...apt });
+    localStorage.setItem(APPOINTMENTS_KEY, JSON.stringify(saved));
+    render();
+  }
+
+  function render() {
+    processExpiredAppointmentSecurity();
+    const myAppointments = allMyAppointments();
+    const chats = getChats();
+    const list = myAppointments.filter(a => {
+      if (tab === 'concluidos') return a.status === 'Concluído';
+      if (tab === 'cancelados') return a.status === 'Cancelado';
+      return !['Concluído', 'Cancelado'].includes(a.status);
+    });
+    document.getElementById('list').innerHTML = list.length ? list.map(a => `
+      <div class="card">
+        <div style="display:flex; justify-content:space-between; align-items:flex-start;">
+          <div>
+            <div style="font-weight:600;">${a.barberName} <span class="small muted">${a.mode === 'chamada' ? '⚡ chamada' : '🗓️ agendado'}</span></div>
+            <div style="font-size:13px; color:var(--text-muted);">${(a.serviceNames || []).join(', ')} · ${a.type === 'domicilio' ? 'Domicílio' : 'Barbearia'}</div>
+          </div>
+          <span class="badge ${statusBadgeClass(a.status)}">${a.status}</span>
+        </div>
+        <div class="ticket-row" style="padding-bottom:0;"><span class="label">Data</span><span>${a.date} às ${a.time}</span></div>
+        <div class="ticket-row"><span class="label">Valor</span><span class="mono">${formatBRL(a.price)}</span></div>
+        ${renderAppointmentProgress(a, true)}
+        ${a.status === 'Cancelado' && a.cancelledBy === 'barber' ? `
+          <div class="small" style="margin-top:7px; padding:9px 10px; border-radius:9px; color:var(--danger); background:color-mix(in srgb, var(--danger) 8%, transparent);">
+            ⚠️ ${a.cancellationReason || 'Este atendimento foi cancelado pelo barbeiro.'} Pagamento reembolsado.
+          </div>
+        ` : ''}
+        <div style="display:flex; gap:8px; margin-top:6px;">
+          <button class="btn btn-secondary btn-sm" onclick="toggleDetails('${a.id}')">Ver detalhes</button>
+          ${a.status !== 'Concluído' && a.status !== 'Cancelado' ? `<button class="btn btn-danger btn-sm" onclick="cancelAppointment('${a.id}')">Cancelar</button>` : ''}
+          ${a.status === 'Concluído' && !a.rating ? `<button class="btn btn-outline btn-sm" onclick="rateAppointment('${a.id}')">Avaliar</button>` : ''}
+          ${a.status === 'Concluído' && a.rating ? `<span class="badge badge-muted" style="align-self:center;">${'★'.repeat(a.rating)}${'☆'.repeat(5-a.rating)}</span>` : ''}
+        </div>
+        <div id="details-${a.id}" class="card" style="display:none; margin-top:12px; background:var(--surface-2);">
+          <div style="font-weight:600; margin-bottom:8px;">Detalhes do atendimento</div>
+          <div class="ticket-row"><span class="label">Local</span><span style="text-align:right; max-width:65%;">${a.address || (a.type === 'barbearia' ? 'Na barbearia' : 'Endereço informado')}</span></div>
+          <div class="ticket-row"><span class="label">Pagamento</span><span>${a.payment?.method || 'Pago'} · ${a.payment?.status || 'Pago'}</span></div>
+          ${a.mode === 'agendado' ? `
+            <div style="margin-top:10px; padding:11px; border:1px solid var(--border); border-radius:10px;">
+              <div style="font-weight:700; font-size:13px;">🛡️ CortaKi Protege</div>
+              <div class="small muted" style="margin-top:4px;">Sua presença: ${a.security?.customerCheckIn?.at ? 'registrada ✓' : 'não registrada'} · Barbeiro: ${a.security?.barberCheckIn?.at ? 'registrada ✓' : 'aguardando'}</div>
+              ${securityWindowState(a).valid && !a.security?.customerCheckIn?.at ? `<button class="btn btn-secondary btn-block btn-sm" style="margin-top:9px;" onclick="customerCheckIn('${a.id}')">📍 Confirmar que estou no local</button>` : ''}
+              ${a.settlement?.status && a.settlement.status !== 'Retido' ? `<div class="small" style="margin-top:7px; color:var(--gold-bright);">Liquidação: ${a.settlement.status}</div>` : ''}
+              ${!['Concluído', 'Cancelado', 'Ausência do cliente', 'Ausência do barbeiro', 'Em análise de segurança'].includes(a.status) ? `<button class="btn btn-outline btn-block btn-sm" style="margin-top:8px;" onclick="reportSecurityProblem('${a.id}')">⚠️ Contestar ou reportar problema</button>` : ''}
+            </div>
+          ` : ''}
+          ${a.securityCode && !a.securityVerified && !['Cancelado', 'Concluído', 'Encerrado sem verificação'].includes(a.status) ? `
+            <div style="margin-top:10px; padding:12px; border:1px solid var(--gold-dim); border-radius:10px; text-align:center;">
+              <div class="small muted">Código de segurança</div>
+              <div class="mono" style="font-size:24px; letter-spacing:6px; color:var(--gold-bright); font-weight:800;">${a.securityCode}</div>
+              <div class="small muted">Informe somente quando o serviço for começar.</div>
+            </div>
+          ` : ''}
+          ${['Confirmado', 'A caminho', 'Em atendimento'].includes(a.status) ? `<button class="btn btn-primary btn-block" style="margin-top:8px;" onclick="toggleChat('${a.id}')">💬 Conversar com o barbeiro</button>` : `<div class="small muted" style="margin-top:8px;">O chat será liberado assim que o barbeiro confirmar.</div>`}
+        </div>
+        ${['Confirmado', 'A caminho', 'Em atendimento'].includes(a.status) ? `
+          <div id="chat-${a.id}" class="card" style="display:none; margin-top:12px; background:var(--surface-2);">
+            <div style="font-weight:600; margin-bottom:10px;">Chat com ${a.barberName}</div>
+            <div style="display:flex; flex-direction:column; gap:7px; margin-bottom:10px; max-height:180px; overflow:auto;">
+              ${(chats[a.id] || []).length ? (chats[a.id] || []).map(message => `
+                <div class="small" style="align-self:${message.from === 'customer' ? 'flex-end' : 'flex-start'}; max-width:82%; padding:8px 10px; border-radius:10px; background:${message.from === 'customer' ? 'var(--gold)' : 'var(--surface-3)'}; color:${message.from === 'customer' ? '#111' : 'var(--text)'};">${message.text}</div>
+              `).join('') : `<div class="small muted">Envie uma mensagem para combinar os detalhes do atendimento.</div>`}
+            </div>
+            <div style="display:flex; gap:8px;">
+              <input id="chat-input-${a.id}" type="text" placeholder="Digite sua mensagem..." style="flex:1;">
+              <button class="btn btn-primary btn-sm" onclick="sendMessage('${a.id}')">Enviar</button>
+            </div>
+          </div>
+        ` : ''}
+      </div>
+    `).join('') : `<div class="empty-state"><div class="icon">🗓️</div>${tab === 'cancelados' ? 'Nenhuma solicitação cancelada.' : 'Nenhum agendamento aqui.'}</div>`;
+  }
+
+  render();
+  window.addEventListener('storage', render);
+</script>
+</body>
+</html>

@@ -1,0 +1,63 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Agendamento confirmado — Navalha</title>
+<link rel="stylesheet" href="assets/css/style.css">
+</head>
+<body>
+<div class="app-shell">
+  <div id="topbar"></div>
+  <div class="page" id="content"></div>
+</div>
+
+<script src="assets/js/mock-data.js"></script>
+<script src="assets/js/app.js"></script>
+<script src="assets/js/cortaki-api.js"></script>
+<script>
+(async function(){
+  renderTopbar({ title: '', back: false });
+  const draft = BookingDraft.get();
+  let storedAppointment = null;
+  if (draft.secureBackend && draft.appointmentId && window.CORTAKI_API) {
+    try {
+      const result = await CORTAKI_API.appointment(draft.appointmentId);
+      const a = result.appointment;
+      storedAppointment = { ...a, id:a.id, barberId:a.barber_id, customerId:a.client_id, shopId:a.shop_id, price:a.gross_cents/100, securityCode:draft.securityCode, securityVerified:Boolean(a.code_verified_at), status:a.status, mode:a.mode==='SCHEDULED'?'agendado':'chamada', payment:{status:'Pago'} };
+    } catch(e) { console.error(e); }
+  } else {
+    try { storedAppointment = (JSON.parse(localStorage.getItem('navalha_appointments') || '[]') || []).find(item => item.id === draft.appointmentId) || null; } catch {}
+  }
+  if (!draft.barberId) {
+    document.getElementById('content').innerHTML = `<div class="empty-state"><div class="icon">🗓️</div>Nenhum agendamento em andamento.<br><a class="btn btn-primary" href="index.html" style="margin-top:16px; display:inline-flex;">Voltar ao início</a></div>`;
+    return;
+  }
+  const isAgendado = draft.mode !== 'chamada';
+  const ticketNumber = 'CK-' + (String(draft.appointmentId || '').split('_').pop()?.slice(0,8).toUpperCase() || 'DEMO');
+  const statusMap={REQUESTED:'Solicitado',CONFIRMED:'Confirmado',SEARCHING:'Buscando barbeiro',ASSIGNED:'Barbeiro encontrado',ON_THE_WAY:'A caminho',CHECKED_IN:'Check-in realizado',IN_SERVICE:'Em atendimento',COMPLETED:'Concluído',CANCELLED:'Cancelado',NO_SHOW:'Não compareceu',DISPUTED:'Em análise'};
+  const statusLabel = storedAppointment?.status ? (statusMap[storedAppointment.status] || storedAppointment.status) : (isAgendado ? 'Solicitado' : 'Confirmado');
+  const progressAppointment = storedAppointment || { mode:draft.mode || 'agendado', status:statusLabel, payment:{ method:draft.payMethod, status:'Pago e retido' } };
+  const amount = storedAppointment?.price ?? draft.totalPrice;
+  document.getElementById('content').innerHTML = `
+    <div class="ticket" style="margin-top: 12px;">
+      <div class="ticket-header"><div class="status-icon">✅</div><h1 class="display" style="font-size:20px; margin-top:6px;">${isAgendado ? 'Agendamento enviado' : 'Barbeiro a caminho'}</h1><span class="ticket-number mono" style="font-size:12px; color:var(--text-muted);">Nº ${ticketNumber}</span></div>
+      <div class="stub-divider"></div><div class="ticket-body">
+        <div class="ticket-row"><span class="label">Barbeiro</span><span>${escapeHTML(draft.barberName||'—')}</span></div>
+        <div class="ticket-row"><span class="label">Serviços</span><span style="text-align:right; max-width:60%;">${escapeHTML((draft.serviceNames || []).join(', '))}</span></div>
+        <div class="ticket-row"><span class="label">Tipo</span><span>${draft.type === 'domicilio' ? 'Atendimento a domicílio' : 'Atendimento na barbearia'}</span></div>
+        <div class="ticket-row"><span class="label">${draft.type === 'domicilio' ? 'Endereço' : 'Local'}</span><span style="text-align:right; max-width:60%;">${escapeHTML(draft.address || '—')}</span></div>
+        <div class="ticket-row"><span class="label">Data</span><span>${escapeHTML(draft.dayLabel||'—')}</span></div><div class="ticket-row"><span class="label">Horário</span><span class="mono">${escapeHTML(draft.time||'—')}</span></div>
+        <hr class="divider"><div class="ticket-row"><span class="label">Valor pago</span><span class="mono price" style="color:var(--gold-bright);">${formatBRL(amount)}</span></div>
+        <div class="ticket-row"><span class="label">Pagamento</span><span class="badge badge-success">${escapeHTML(draft.payMethod||'Pagamento')} · Pago (teste local)</span></div>
+        <div class="ticket-row"><span class="label">Status</span><span class="badge ${statusBadgeClass(statusLabel)}">${escapeHTML(statusLabel)}</span></div>
+      </div>
+    </div>
+    <div class="card" style="margin-top:14px"><strong style="font-size:14px">Andamento automático</strong>${renderAppointmentProgress(progressAppointment)}</div>
+    <div class="card" style="margin-top:14px; text-align:center; border-color:var(--gold-dim);"><div class="small muted">Código de segurança do atendimento</div><div class="mono" style="font-size:30px; font-weight:800; letter-spacing:7px; color:var(--gold-bright); margin:8px 0;">${escapeHTML(draft.securityCode || '------')}</div><div class="small muted">Informe este código ao barbeiro somente quando ele chegar e estiver pronto para iniciar. Não envie pelo chat.</div></div>
+    <p style="font-size:12px; color:var(--text-muted); margin-top:12px; text-align:center;">${isAgendado ? 'O valor fica protegido até a conclusão do atendimento.' : 'O barbeiro foi notificado e está em busca/rota.'}</p>
+    <div style="display:flex; flex-direction:column; gap:10px; margin-top:20px;"><a class="btn btn-primary btn-block" href="atendimento.html?id=${encodeURIComponent(draft.appointmentId || 'demo')}&draft=1">Acompanhar status</a><a class="btn btn-secondary btn-block" href="index.html">Voltar ao início</a></div>`;
+})();
+</script>
+</body>
+</html>

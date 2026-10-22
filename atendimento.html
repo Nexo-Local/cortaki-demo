@@ -1,0 +1,321 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Detalhes do atendimento — Navalha</title>
+<link rel="stylesheet" href="assets/css/style.css">
+</head>
+<body>
+<div class="app-shell">
+  <div id="topbar"></div>
+  <div class="page" id="content"></div>
+</div>
+
+<script src="assets/js/mock-data.js"></script>
+<script src="assets/js/app.js"></script>
+<script src="assets/js/cortaki-api.js"></script>
+<script>
+  renderTopbar({ title: 'Detalhes do atendimento' });
+
+  const APPOINTMENTS_KEY = 'navalha_appointments';
+  const CUSTOMER_NOTIFICATIONS_KEY = 'navalha_customer_notifications';
+  const BARBER_NOTIFICATIONS_KEY = 'navalha_barber_notifications';
+  const BARBER_BALANCE_KEY = 'navalha_barber_balance';
+  const CUSTOMER_BALANCE_KEY = 'navalha_customer_balance';
+  const CHAT_KEY = 'navalha_appointment_chats';
+  let secureBackend = false;
+  const API_STATUS = {REQUESTED:'Solicitado',CONFIRMED:'Confirmado',SEARCHING:'Buscando barbeiro',ASSIGNED:'Barbeiro encontrado',ON_THE_WAY:'A caminho',CHECKED_IN:'Check-in realizado',IN_SERVICE:'Em atendimento',COMPLETED:'Concluído',CANCELLED:'Cancelado',NO_SHOW:'Ausência do cliente',DISPUTED:'Em análise de segurança'};
+
+  function getSavedAppointments() {
+    try {
+      const saved = JSON.parse(localStorage.getItem(APPOINTMENTS_KEY) || '[]');
+      return Array.isArray(saved) ? saved : [];
+    } catch { return []; }
+  }
+
+  let apt = getSavedAppointments().find(a => a.id === qs('id')) || APPOINTMENTS.find(a => a.id === qs('id'));
+
+  if (!apt) {
+    const draft = BookingDraft.get();
+    if (draft.barberId) {
+      const barber = getBarberById(draft.barberId);
+      apt = {
+        id: draft.appointmentId || 'demo', barberId: barber.id, barberName: barber.name, customerId: DEMO_USERS.customer.id, customerName: DEMO_USERS.customer.name,
+        serviceNames: draft.serviceNames || [], price: draft.totalPrice, type: draft.type,
+        date: draft.dayLabel, time: draft.time, mode: draft.mode, address: draft.address,
+        status: draft.mode === 'chamada' ? 'Confirmado' : 'Solicitado',
+        securityCode: draft.securityCode || String(Math.floor(100000 + Math.random() * 900000)),
+        securityVerified: false,
+        settlement: { status: 'Retido', barberAmount: 0, customerRefund: 0 },
+        payment: { method: draft.payMethod, status: 'Pago e retido' },
+      };
+    }
+  }
+
+  const isBarberView = qs('view') === 'barbeiro';
+  const immediateFlow = ['Solicitado', 'Confirmado', 'A caminho', 'Em atendimento', 'Concluído'];
+  const scheduledFlow = ['Solicitado', 'Confirmado', 'Em atendimento', 'Concluído'];
+
+  function getFlow() {
+    return apt?.mode === 'agendado' ? scheduledFlow : immediateFlow;
+  }
+
+  function statusLabel(status) {
+    if (apt?.mode === 'agendado' && status === 'Concluído') return 'Finalizado';
+    return status;
+  }
+
+  function persistAppointment() {
+    if (secureBackend) return;
+    const saved = getSavedAppointments();
+    const index = saved.findIndex(item => item.id === apt.id);
+    if (index >= 0) saved[index] = apt; else saved.push(apt);
+    localStorage.setItem(APPOINTMENTS_KEY, JSON.stringify(saved));
+  }
+
+  function addNotification(key, targetIdName, targetId, type, message) {
+    let notifications = [];
+    try { notifications = JSON.parse(localStorage.getItem(key) || '[]'); } catch {}
+    if (!Array.isArray(notifications)) notifications = [];
+    notifications.unshift({ id: `notice-${Date.now()}-${Math.random().toString(16).slice(2)}`, [targetIdName]: targetId, appointmentId: apt.id, type, message, createdAt: new Date().toISOString(), read: false });
+    localStorage.setItem(key, JSON.stringify(notifications));
+  }
+
+  function creditBalance(key, amount) {
+    localStorage.setItem(key, String(Number(localStorage.getItem(key) || 0) + amount));
+  }
+
+  function getChats() { return safeStoredJSON(CHAT_KEY, {}) || {}; }
+  function saveChats(data) { localStorage.setItem(CHAT_KEY, JSON.stringify(data)); }
+  function renderChat() {
+    const thread = document.getElementById('chat-thread');
+    if (!thread || !apt) return;
+    const data = getChats();
+    const messages = data[apt.id] || [{ from: 'barber', text: 'Olá! Recebi sua solicitação e já estou me preparando.', at: new Date().toISOString() }];
+    thread.innerHTML = messages.map(message => `<div class="chat-bubble ${message.from === 'barber' ? 'barber' : 'customer'}">${escapeHTML(message.text)}<div style="font-size:10px;opacity:.65;margin-top:3px">${new Date(message.at || Date.now()).toLocaleTimeString('pt-BR', { hour:'2-digit', minute:'2-digit' })}</div></div>`).join('');
+    thread.scrollTop = thread.scrollHeight;
+  }
+  function sendChat() {
+    const input = document.getElementById('chat-input');
+    const text = input?.value.trim();
+    if (!text || !apt) return;
+    const data = getChats();
+    if (!Array.isArray(data[apt.id])) data[apt.id] = [];
+    data[apt.id].push({ from: isBarberView ? 'barber' : 'customer', text, at: new Date().toISOString() });
+    saveChats(data);
+    input.value = '';
+    renderChat();
+  }
+
+  function renderLiveLocation() {
+    if (!apt || apt.mode !== 'chamada') return '';
+    const live = safeStoredJSON(`navalha_live_location_${apt.id}`, {}) || {};
+    const progress = Math.max(0, Math.min(7, Number(live.progress || 0)));
+    return `
+      <div class="live-map" aria-label="Mapa da localização do barbeiro em tempo real">
+        <div class="map-eta"><strong id="eta">${Math.max(2, 9 - progress)} min</strong><br><span style="opacity:.75">até você · localização ao vivo simulada</span></div>
+        <div class="map-route"></div>
+        <div class="map-marker barber" id="barber-marker" style="transform:translate(${progress * 18}px,${progress * -8}px) rotate(-45deg)">${appIcon('scissors')}</div>
+        <div class="map-marker customer">${appIcon('user')}</div>
+      </div>
+      <div class="card" style="margin-top:12px;margin-bottom:20px"><div class="ticket-row"><span class="label">Local do atendimento</span><span style="text-align:right;max-width:65%">${escapeHTML(apt.address || 'Endereço não informado')}</span></div><div class="ticket-row"><span class="label">Atualização</span><span>${live.updatedAt ? new Date(live.updatedAt).toLocaleTimeString('pt-BR', { hour:'2-digit', minute:'2-digit' }) : 'Aguardando deslocamento'}</span></div></div>`;
+  }
+
+  function renderEmergency(currentStatus) {
+    if (!['Confirmado', 'A caminho', 'Em atendimento', 'Pago'].includes(currentStatus)) return '';
+    return `<div class="emergency-panel"><strong>Precisa de ajuda?</strong><div class="small">O alerta fica registrado neste atendimento e é mostrado ao cliente e ao barbeiro.</div><div class="emergency-actions"><button class="btn btn-danger emergency-button" onclick="activateAppointmentEmergency('${apt.id}','${isBarberView ? 'barber' : 'customer'}')">🚨 Acionar emergência</button><a class="btn btn-secondary" href="tel:190">Ligar para o 190</a></div></div>`;
+  }
+
+  function renderTimeline(currentStatus) {
+    if (currentStatus === 'Cancelado') {
+      return `<div class="card" style="text-align:center; color: var(--danger);">Este agendamento foi cancelado.</div>`;
+    }
+    if (currentStatus === 'Encerrado sem verificação') {
+      return `<div class="card" style="color:var(--danger);">Atendimento encerrado sem validação. O valor foi dividido igualmente: 50% para o barbeiro e 50% devolvido ao cliente.</div>`;
+    }
+    const flow = getFlow();
+    const currentIndex = flow.indexOf(currentStatus);
+    return flow.map((label, i) => `
+      <div class="timeline-step ${i <= currentIndex ? 'done' : ''}">
+        <div class="dot-col">
+          <div class="dot"></div>
+          ${i < flow.length - 1 ? '<div class="line"></div>' : ''}
+        </div>
+        <div class="content">
+          <div class="step-title">${statusLabel(label)}</div>
+          ${i === currentIndex ? '<div class="step-time">Status atual</div>' : ''}
+        </div>
+      </div>
+    `).join('');
+  }
+
+  function renderBarberActions(currentStatus) {
+    if (!isBarberView) return '';
+    if (currentStatus === 'Cancelado' || currentStatus === 'Encerrado sem verificação') return '';
+    if (currentStatus === 'Concluído') return `<div class="badge badge-success" style="margin-top:12px;">Atendimento finalizado e valor liberado</div>`;
+    if (apt.mode === 'agendado' && currentStatus === 'Confirmado') {
+      if (apt.securityVerified) {
+        return `<button class="btn btn-primary btn-block" style="margin-top:16px;" onclick="finishService()">Finalizar atendimento e liberar pagamento</button>`;
+      }
+      return `
+        <div class="card" style="margin-top:16px; border-color:var(--gold-dim);">
+          <div style="font-weight:700; margin-bottom:5px;">Verificação de segurança</div>
+          <div class="small muted" style="margin-bottom:10px;">Peça ao cliente o código de 6 dígitos para confirmar o início do serviço.</div>
+          <div style="display:flex; gap:8px;">
+            <input id="security-code-input" type="text" inputmode="numeric" maxlength="6" placeholder="000000" style="flex:1; letter-spacing:5px; text-align:center;">
+            <button class="btn btn-primary" onclick="verifyAndStart()">Validar</button>
+          </div>
+          <button class="btn btn-secondary btn-block" style="margin-top:10px;" onclick="reportSecureIssue()">⚠️ Reportar problema e reter pagamento</button>
+        </div>`;
+    }
+    if (currentStatus === 'A caminho') {
+      return `
+        <div class="card" style="margin-top:16px; border-color:var(--gold-dim);">
+          <div style="font-weight:700; margin-bottom:5px;">Verificação de segurança</div>
+          <div class="small muted" style="margin-bottom:10px;">Peça ao cliente o código de 6 dígitos. Sem ele, o serviço não pode ser iniciado normalmente.</div>
+          <div style="display:flex; gap:8px;">
+            <input id="security-code-input" type="text" inputmode="numeric" maxlength="6" placeholder="000000" style="flex:1; letter-spacing:5px; text-align:center;">
+            <button class="btn btn-primary" onclick="verifyAndStart()">Validar</button>
+          </div>
+          ${apt.mode === 'agendado'
+            ? `<button class="btn btn-secondary btn-block" style="margin-top:10px;" onclick="reportSecureIssue()">⚠️ Reportar problema e reter pagamento</button>`
+            : `<button class="btn btn-danger btn-block" style="margin-top:10px;" onclick="settleWithoutCode()">Encerrar sem código — dividir 50/50</button>`}
+        </div>`;
+    }
+    if (currentStatus === 'Em atendimento') {
+      return `<button class="btn btn-primary btn-block" style="margin-top:16px;" onclick="finishService()">Finalizar atendimento e liberar pagamento</button>`;
+    }
+    const flow = getFlow();
+    const currentIndex = flow.indexOf(currentStatus);
+    const next = flow[currentIndex + 1];
+    return next ? `<button class="btn btn-primary btn-block" style="margin-top:16px;" onclick="advanceStatus()">Marcar como "${statusLabel(next)}"</button>` : '';
+  }
+
+  function advanceStatus() {
+    const flow = getFlow();
+    const currentIndex = flow.indexOf(apt.status);
+    const next = flow[currentIndex + 1];
+    if (next && next !== 'Em atendimento' && next !== 'Concluído') {
+      apt.status = next;
+      persistAppointment();
+      render();
+    }
+  }
+
+  async function verifyAndStart() {
+    const informedCode = document.getElementById('security-code-input').value.trim();
+    if (secureBackend) {
+      try { const result = await CORTAKI_API.verifyCode(apt.id, informedCode); apt.status = API_STATUS[result.status] || result.status; apt.securityVerified = true; render(); }
+      catch(e) { alert(e?.data?.error === 'CODE_LOCKED' ? 'Código bloqueado temporariamente.' : 'Código inválido ou operação não permitida.'); }
+      return;
+    }
+    if (apt.mode === 'agendado' && !apt.security?.barberCheckIn?.at) { alert('Faça o check-in de presença na Agenda antes de validar o código.'); return; }
+    const validation = validateAppointmentSecurityCode(apt, informedCode);
+    if (!validation.ok) { alert(validation.message); return; }
+    apt.status = apt.mode === 'agendado' ? 'Confirmado' : 'Em atendimento';
+    persistAppointment(); render();
+  }
+
+  async function reportSecureIssue() {
+    const reason = await showAppPrompt('Descreva o problema. O valor ficará retido para análise:', '', { title: 'Reportar problema' });
+    if (!reason?.trim()) return;
+    openAppointmentDispute(apt, 'barber', reason.trim());
+    alert('Ocorrência registrada. Nenhum valor foi liberado automaticamente.');
+    render();
+  }
+
+  async function finishService() {
+    if (secureBackend) {
+      try { await CORTAKI_API.complete(apt.id); apt.status='Concluído'; render(); }
+      catch(e) { alert(e?.data?.error === 'INVALID_STATE' ? 'O atendimento ainda não está no estado correto para finalizar.' : 'Não foi possível finalizar.'); }
+      return;
+    }
+    if (!apt.securityVerified) { alert('Não é possível finalizar sem validar o código do cliente.'); return; }
+    apt.status = 'Concluído'; apt.settlement = { status:'Liberado integralmente', barberAmount:Number(apt.price||0), customerRefund:0 };
+    persistAppointment(); render();
+  }
+
+  async function settleWithoutCode() {
+    if (!await showAppConfirm('Sem o código, o atendimento não será marcado como concluído. Metade será paga ao barbeiro e metade devolvida ao cliente. Continuar?', { title: 'Encerrar sem código' })) return;
+    const half = Number(apt.price || 0) / 2;
+    apt.status = 'Encerrado sem verificação';
+    apt.securityVerified = false;
+    apt.settlement = { status: 'Dividido 50/50', barberAmount: half, customerRefund: half };
+    apt.payment = { ...(apt.payment || {}), status: 'Dividido 50/50' };
+    if (apt.type === 'barbearia' && (apt.shopId || getBarberById(apt.barberId)?.shopId)) settleShopAppointment(apt); else creditBalance(BARBER_BALANCE_KEY, half);
+    creditBalance(CUSTOMER_BALANCE_KEY, half);
+    persistAppointment();
+    addNotification(CUSTOMER_NOTIFICATIONS_KEY, 'customerId', apt.customerId, 'security-failed', `Atendimento encerrado sem código: ${formatBRL(half)} foram devolvidos ao seu saldo e ${formatBRL(half)} repassados ao barbeiro.`);
+    addNotification(BARBER_NOTIFICATIONS_KEY, 'barberId', apt.barberId, 'security-failed', `Atendimento encerrado sem código. Você recebeu 50% do valor (${formatBRL(half)}).`);
+    render();
+  }
+
+  function render() {
+    if (!apt) {
+      document.getElementById('content').innerHTML = `<div class="empty-state"><div class="icon">🔎</div>Atendimento não encontrado.</div>`;
+      return;
+    }
+    document.getElementById('content').innerHTML = `
+      ${apt.mode === 'chamada' && !['Cancelado','Concluído','Encerrado sem verificação'].includes(apt.status) ? renderLiveLocation() : ''}
+      <div class="card" style="margin-bottom:20px;">
+        <div class="ticket-row"><span class="label">${isBarberView ? 'Cliente' : 'Barbeiro'}</span><span>${isBarberView ? apt.customerName : apt.barberName}</span></div>
+        <div class="ticket-row"><span class="label">Serviços</span><span style="text-align:right; max-width:60%;">${(apt.serviceNames || []).join(', ')}</span></div>
+        <div class="ticket-row"><span class="label">Tipo</span><span>${apt.type === 'domicilio' ? 'Domicílio' : 'Barbearia'}</span></div>
+        <div class="ticket-row"><span class="label">Data</span><span>${apt.date} às ${apt.time}</span></div>
+        <div class="ticket-row"><span class="label">Valor</span><span class="mono">${formatBRL(apt.price)}</span></div>
+        ${apt.payment ? `<div class="ticket-row"><span class="label">Pagamento</span><span class="badge badge-success">${apt.payment.method} · ${apt.payment.status}</span></div>` : ''}
+      </div>
+      ${apt.customerHairPhoto ? `<div class="card" style="margin-bottom:20px;"><strong style="font-size:14px;">📷 Foto do cabelo antes do atendimento</strong><img src="${apt.customerHairPhoto}" alt="Estado atual do cabelo" class="request-photo-preview"><p class="small muted" style="margin-top:8px;">${isBarberView ? 'Prepare os equipamentos necessários com base nesta referência.' : 'Esta foto foi enviada ao barbeiro escolhido.'}</p></div>` : ''}
+      ${!isBarberView && apt.status !== 'Cancelado' && apt.status !== 'Concluído' && apt.status !== 'Encerrado sem verificação' ? `
+        <div class="card" style="margin-bottom:20px; text-align:center; border-color:var(--gold-dim);">
+          <div class="small muted">Seu código de segurança</div>
+          <div class="mono" style="font-size:30px; font-weight:800; letter-spacing:7px; color:var(--gold-bright); margin:8px 0;">${apt.securityCode || '------'}</div>
+          <div class="small muted">Informe ao barbeiro apenas no momento de iniciar o serviço. Não compartilhe pelo chat.</div>
+        </div>
+      ` : ''}
+      <h2 style="font-size:16px; margin-bottom:8px;">Andamento da solicitação</h2>
+      ${renderAppointmentProgress(apt)}
+      ${['Cancelado','Encerrado sem verificação','Ausência do cliente','Ausência do barbeiro','Em análise de segurança'].includes(apt.status) ? `<div class="card" style="margin-bottom:14px;color:var(--danger)">Esta solicitação foi interrompida: ${apt.status}.</div>` : ''}
+      ${renderBarberActions(apt.status)}
+      ${renderEmergency(apt.status)}
+      ${apt.mode === 'chamada' && !['Cancelado','Encerrado sem verificação'].includes(apt.status) ? `<div id="chat-section" class="section-title"><h2>Chat com ${isBarberView ? 'o cliente' : 'o barbeiro'}</h2></div><div class="card"><div class="chat-thread" id="chat-thread"></div><div style="display:flex;gap:8px;margin-top:10px"><input id="chat-input" placeholder="Digite uma mensagem" style="flex:1"><button class="btn btn-primary" onclick="sendChat()">Enviar</button></div></div>` : ''}
+    `;
+    renderChat();
+  }
+
+  const secureDraft = BookingDraft.get();
+  secureBackend = Boolean(secureDraft.secureBackend && secureDraft.appointmentId && window.CORTAKI_API);
+  if (apt) {
+    if (!secureBackend) {
+      if (apt.mode === 'agendado' && apt.status === 'Pago') apt.status = 'Confirmado';
+      if (!apt.securityCode) apt.securityCode = String(Math.floor(100000 + Math.random() * 900000));
+      if (typeof apt.securityVerified !== 'boolean') apt.securityVerified = false;
+      if (!apt.settlement) apt.settlement = { status: 'Retido', barberAmount: 0, customerRefund: 0 };
+      persistAppointment();
+    }
+  }
+  render();
+  if (secureBackend) {
+    CORTAKI_API.appointment(secureDraft.appointmentId).then(result => {
+      const a=result.appointment; const first=result.services?.[0];
+      const dt=a.scheduled_at ? new Date(a.scheduled_at) : null;
+      apt={ id:a.id, barberId:a.barber_id, barberName: getBarberById(a.barber_id)?.name || 'Barbeiro', customerId:a.client_id, customerName:DEMO_USERS.customer.name, serviceNames:(result.services||[]).map(x=>x.name_snapshot), price:a.gross_cents/100, type:a.shop_id?'barbearia':'domicilio', shopId:a.shop_id, address:a.address || '', date:dt?dt.toLocaleDateString('pt-BR'):'—', time:dt?dt.toLocaleTimeString('pt-BR',{hour:'2-digit',minute:'2-digit'}):'—', mode:a.mode==='SCHEDULED'?'agendado':'chamada', status:API_STATUS[a.status]||a.status, securityCode:secureDraft.securityCode, securityVerified:Boolean(a.code_verified_at), payment:{method:'Pagamento',status:a.status==='CONFIRMED'?'Pago':'Protegido'} };
+      render();
+    }).catch(console.error);
+  }
+  window.addEventListener('storage', event => {
+    if (apt && (event.key === `navalha_live_location_${apt.id}` || event.key === CHAT_KEY || event.key === APPOINTMENTS_KEY)) render();
+  });
+  setInterval(() => {
+    if (!apt || apt.mode !== 'chamada') return;
+    const live = safeStoredJSON(`navalha_live_location_${apt.id}`, {}) || {};
+    const marker = document.getElementById('barber-marker');
+    const eta = document.getElementById('eta');
+    const progress = Math.max(0, Math.min(7, Number(live.progress || 0)));
+    if (marker) marker.style.transform = `translate(${progress * 18}px,${progress * -8}px) rotate(-45deg)`;
+    if (eta) eta.textContent = `${Math.max(2, 9 - progress)} min`;
+  }, 1500);
+</script>
+</body>
+</html>

@@ -1,0 +1,107 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Cortaki — Seu corte, do seu jeito</title>
+<link rel="stylesheet" href="assets/css/style.css">
+</head>
+<body>
+<div class="app-shell">
+  <header class="client-home-header">
+    <button class="client-menu-button" id="client-menu-button" type="button" aria-label="Abrir menu" aria-expanded="false"><span></span></button>
+    <img src="assets/img/logo-cortaki.png" alt="CortaKi" data-brand-logo>
+    <a class="client-notification-button" href="notificacoes.html" aria-label="Notificações"><svg class="app-icon"><use href="assets/icons/app-icons.svg#bell"></use></svg></a>
+  </header>
+  <div class="client-menu-overlay" id="client-menu-overlay"></div>
+  <aside class="client-menu-drawer" id="client-menu-drawer" aria-hidden="true">
+    <div class="account-menu">
+      <a class="card account-menu-item" href="perfil-cliente.html"><span class="menu-icon"><svg class="app-icon"><use href="assets/icons/app-icons.svg#user"></use></svg></span><span class="menu-copy"><span class="menu-title">Perfil</span></span></a>
+      <a class="card account-menu-item" href="configuracoes.html"><span class="menu-icon"><svg class="app-icon"><use href="assets/icons/app-icons.svg#settings"></use></svg></span><span class="menu-copy"><span class="menu-title">Configurações</span></span></a>
+      <a class="card account-menu-item" href="notificacoes.html"><span class="menu-icon"><svg class="app-icon"><use href="assets/icons/app-icons.svg#bell"></use></svg></span><span class="menu-copy"><span class="menu-title">Notificações</span></span></a>
+      <a class="card account-menu-item" href="mensagens.html?perfil=cliente"><span class="menu-icon"><svg class="app-icon"><use href="assets/icons/app-icons.svg#message"></use></svg></span><span class="menu-copy"><span class="menu-title">Mensagens</span></span></a>
+      <div class="card account-menu-item"><span class="menu-icon">☀️</span><span class="menu-copy"><span class="menu-title">Tema claro</span></span><label class="toggle"><input id="home-theme-toggle" type="checkbox"><span class="track"></span></label></div>
+      <a class="card account-menu-item" href="sobre.html"><span class="menu-icon">ℹ️</span><span class="menu-copy"><span class="menu-title">Sobre o aplicativo</span></span><span class="menu-arrow">›</span></a>
+      <button class="card account-menu-item" id="logout-button" type="button" style="width:100%;color:var(--danger);cursor:pointer;text-align:left"><span class="menu-icon">↪️</span><span class="menu-copy"><span class="menu-title">Sair</span></span></button>
+    </div>
+  </aside>
+
+  <div class="page">
+    <div style="padding: 10px 0 8px;">
+      <h1 class="display" style="font-size: 27px; line-height: 1.15;">Como você quer cortar hoje?</h1>
+      <p style="color: var(--text-muted); font-size: 14px; margin-top: 8px;">Chame agora ou escolha um horário.</p>
+    </div>
+
+    <a href="busca.html" class="search-launcher" aria-label="Abrir busca"><span class="search-icon"><svg class="app-icon"><use href="assets/icons/app-icons.svg#search"></use></svg></span><span class="search-placeholder">Busque barbeiros, serviços ou barbearias</span></a>
+
+    <a href="chamar.html" class="card" style="display:flex; align-items:center; gap:14px; margin-top:20px; border-color: var(--gold-dim); background: linear-gradient(180deg, var(--gold-wash), var(--surface));">
+      <div style="width:46px; height:46px; border-radius:13px; background:linear-gradient(155deg, var(--gold-bright), var(--gold-dim)); display:flex; align-items:center; justify-content:center; font-size:22px; flex:0 0 auto;"><svg class="app-icon"><use href="assets/icons/app-icons.svg#bolt"></use></svg></div>
+      <div style="flex:1;">
+        <div style="font-weight:700; font-size:15.5px;">Chamar um barbeiro agora</div>
+        <div style="font-size:12.5px; color:var(--text-muted); margin-top:2px;">Encontre um profissional disponível perto de você</div>
+      </div>
+      <span style="color:var(--gold-bright); font-size:18px;">→</span>
+    </a>
+
+    <a href="busca.html" class="card" style="display:flex; align-items:center; gap:14px; margin-top:10px;">
+      <div style="width:46px; height:46px; border-radius:13px; background:var(--surface-2); border:1px solid var(--border); display:flex; align-items:center; justify-content:center; font-size:20px; flex:0 0 auto;">🗓️</div>
+      <div style="flex:1;">
+        <div style="font-weight:700; font-size:15.5px;">Agendar para depois</div>
+        <div style="font-size:12.5px; color:var(--text-muted); margin-top:2px;">Escolha profissional, dia e horário</div>
+      </div>
+      <span style="color:var(--text-muted); font-size:18px;">→</span>
+    </a>
+
+    <div class="section-title">
+      <h2>Posts recentes</h2>
+      <span class="small muted">Ativos por 24h</span>
+    </div>
+    <div id="home-post-feed" class="post-feed"></div>
+  </div>
+
+  <div id="bottom-nav"></div>
+</div>
+
+<script src="assets/js/mock-data.js"></script>
+<script src="assets/js/app.js"></script>
+<script>
+  renderBottomNav('home');
+
+  const menuButton = document.getElementById('client-menu-button');
+  const menuDrawer = document.getElementById('client-menu-drawer');
+  const menuOverlay = document.getElementById('client-menu-overlay');
+  function setClientMenu(open) {
+    menuButton.classList.toggle('active', open);
+    menuDrawer.classList.toggle('open', open);
+    menuOverlay.classList.toggle('open', open);
+    menuButton.setAttribute('aria-expanded', String(open));
+    menuButton.setAttribute('aria-label', open ? 'Fechar menu' : 'Abrir menu');
+    menuDrawer.setAttribute('aria-hidden', String(!open));
+  }
+  menuButton.addEventListener('click', () => setClientMenu(!menuDrawer.classList.contains('open')));
+  menuOverlay.addEventListener('click', () => setClientMenu(false));
+  document.addEventListener('keydown', event => { if (event.key === 'Escape') setClientMenu(false); });
+  menuDrawer.querySelectorAll('a').forEach(link => link.addEventListener('click', () => setClientMenu(false)));
+
+  const homeThemeToggle = document.getElementById('home-theme-toggle');
+  homeThemeToggle.checked = getAppTheme() === 'light';
+  homeThemeToggle.addEventListener('change', () => setAppTheme(homeThemeToggle.checked ? 'light' : 'dark'));
+  document.getElementById('logout-button').addEventListener('click', () => {
+    sessionStorage.clear();
+    location.href = 'login.html';
+  });
+
+  const posts = getCortakiPosts();
+  document.getElementById('home-post-feed').innerHTML = posts.length ? posts.map(post => `
+    <article class="post-card">
+      <a class="post-author" href="${cortakiAuthorUrl(post)}">
+        <img src="${post.authorPhoto || avatarFor(post.authorId, post.authorName)}" alt="${escapeHTML(post.authorName)}">
+        <span><strong>${escapeHTML(post.authorName)}</strong><small>${post.authorType === 'shop' ? 'Barbearia' : 'Barbeiro'} · expira em ${cortakiPostTimeLeft(post.expiresAt)}</small></span>
+      </a>
+      <img class="post-image" src="${post.image}" alt="Publicação de ${escapeHTML(post.authorName)}" loading="lazy">
+      ${post.caption ? `<p class="post-caption">${escapeHTML(post.caption)}</p>` : ''}
+    </article>
+  `).join('') : `<div class="empty-state"><div class="icon">📸</div>Nenhum post ativo agora. As publicações dos barbeiros e barbearias aparecem aqui durante 24 horas.</div>`;
+</script>
+</body>
+</html>

@@ -1,0 +1,168 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Perfil do barbeiro — Navalha</title>
+<link rel="stylesheet" href="assets/css/style.css">
+</head>
+<body>
+<div class="app-shell has-booking-footer">
+  <div id="topbar"></div>
+  <div style="display:flex; justify-content:center; padding:10px 20px 0;">
+    <img src="assets/img/logo-cortaki.png" alt="Cortaki" data-brand-logo style="display:block; width:118px; max-height:48px; object-fit:contain;">
+  </div>
+  <div class="page" id="content"></div>
+  <div class="booking-footer booking-footer-single">
+    <a class="btn btn-primary" style="opacity:.45; pointer-events:none;" id="cta-agendar" aria-disabled="true">Agendar</a>
+  </div>
+</div>
+
+<script src="assets/js/mock-data.js"></script>
+<script src="assets/js/app.js"></script>
+<script>
+  const barberBase = getBarberById(qs('id')) || BARBERS[0];
+  const barber = getBarberPublicData(barberBase);
+  const shop = barber.shopId ? getShopPublicData(getShopById(barber.shopId)) : null;
+  const portfolio = safeStoredJSON(`cortaki_barber_catalog_${barber.id}`, []);
+  const activePosts = getCortakiPosts({ authorId: barber.id });
+  renderTopbar({ title: barber.name });
+
+  const agendarBtn = document.getElementById('cta-agendar');
+  let selectedServiceIds = [];
+
+  const savedReviews = safeStoredJSON('navalha_appointments', [])
+    .filter(item => item.barberId === barber.id && item.rating)
+    .map(item => ({ name: item.customerName || 'Cliente CortaKi', rating: item.rating, text: item.ratingComment || 'Avaliação registrada pelo aplicativo.' }));
+  const reviews = [...savedReviews, ...[
+    { name: 'Rafael M.', rating: 5, text: 'Muito atencioso, ambiente limpo e corte impecável.' },
+    { name: 'Diego P.', rating: 5, text: 'Pontual e capricha no acabamento da barba.' },
+    { name: 'Bruno S.', rating: 4, text: 'Bom atendimento, recomendo agendar com antecedência.' },
+  ]];
+  const displayedReviewCount = barber.reviewCount + savedReviews.length;
+  const displayedRating = displayedReviewCount
+    ? ((barber.rating * barber.reviewCount + savedReviews.reduce((sum, item) => sum + Number(item.rating), 0)) / displayedReviewCount).toFixed(1)
+    : barber.rating;
+
+  // pequena prévia dos próximos 3 dias com horário livre
+  const preview = [];
+  const today = new Date();
+  for (let i = 0; i < 30 && preview.length < 3; i++) {
+    const d = new Date(today.getFullYear(), today.getMonth(), today.getDate() + i);
+    if (dayHasAvailability(barber, d)) {
+      const count = getDaySlots(barber, d).filter(s => s.available).length;
+      preview.push({ label: formatDateLabel(d), count });
+    }
+  }
+
+  document.getElementById('content').innerHTML = `
+    ${barber.coverPhoto ? `<img src="${barber.coverPhoto}" alt="Capa de ${barber.name}" class="profile-cover" style="margin-bottom:-42px;">` : ''}
+    <div style="display:flex; gap:14px; align-items:center;">
+      <img src="${barber.photo}" alt="${barber.name}" class="profile-avatar" style="width:84px;height:84px;${barber.coverPhoto?'margin-left:12px;':''}">
+      <div>
+        <h1 class="display" style="font-size:20px;">${barber.name}</h1>
+        <div class="rating">${starIcons(displayedRating)} <span class="mono">${displayedRating}</span> <span style="color:var(--text-muted); font-weight:400; font-size:13px;">(${displayedReviewCount} avaliações)</span></div>
+        <div style="margin-top:6px; display:flex; gap:6px; flex-wrap:wrap;">
+          ${barber.attendsHome ? '<span class="badge badge-gold">🏠 Domicílio</span>' : ''}
+          ${barber.attendsShop ? '<span class="badge badge-muted">💈 Na barbearia</span>' : ''}
+          ${barber.online ? '<span class="badge badge-success"><span class="badge-dot"></span> Online agora</span>' : '<span class="badge badge-muted">Offline</span>'}
+        </div>
+      </div>
+    </div>
+
+    <p style="color: var(--text-muted); font-size: 14px; margin-top: 16px; line-height:1.5;">${barber.bio}</p>
+
+    <div class="card" style="margin-top:16px;">
+      <div style="display:flex; justify-content:space-between; font-size:13px; color:var(--text-muted);">
+        <span>📍 ${barber.neighborhood} · ${barber.distanceKm} km</span>
+        ${shop ? `<a class="link" href="barbearia.html?id=${shop.id}">${shop.name} →</a>` : ''}
+      </div>
+    </div>
+
+    <div class="section-title"><h2>Escolha os serviços</h2></div>
+    <p class="small muted" style="margin:-8px 0 12px;">Confira primeiro os serviços, valores e duração.</p>
+    <div class="svc-list" id="profile-services">
+      ${barber.services.map(s => `<div class="svc-row" data-service-id="${s.id}" role="checkbox" aria-checked="false" tabindex="0"><div class="box">${appIcon('check')}</div><div class="info"><div class="n icon-label">${appIcon(s.icon)} ${s.name}</div><div class="d">${s.durationMin} min</div></div><span class="mono price">${formatBRL(s.price)}</span></div>`).join('')}
+    </div>
+    <div class="svc-total" id="selected-service-summary" style="display:none;"><span class="muted" id="selected-service-name"></span><strong class="mono price" id="selected-service-total"></strong></div>
+
+    <div class="section-title"><h2>Posts ativos</h2><span class="small muted">24h</span></div>
+    ${activePosts.length ? `<div class="profile-posts">${activePosts.map(post => `<div class="profile-post"><img src="${post.image}" alt="Post de ${escapeHTML(barber.name)}"><span class="post-expiry">${cortakiPostTimeLeft(post.expiresAt)}</span></div>`).join('')}</div>` : `<div class="card small muted">Este profissional não possui posts ativos agora.</div>`}
+
+    <div class="section-title"><h2>Catálogo de trabalhos</h2><span class="small muted">Até 10</span></div>
+    ${portfolio.length ? `<div class="catalog-grid">${portfolio.slice(0,10).map(item => `<div class="catalog-item"><img src="${item.image}" alt="${escapeHTML(item.caption || 'Trabalho realizado')}"><div class="caption">${escapeHTML(item.caption || 'Trabalho realizado')}</div></div>`).join('')}</div>` : `<div class="card small muted">Este profissional ainda não adicionou fotos ao catálogo.</div>`}
+
+    <div class="section-title"><h2>Próximos horários livres</h2></div>
+    <div style="display:flex; flex-direction:column; gap:8px;">
+      ${preview.length ? preview.map(p => `
+        <div class="card" style="display:flex; justify-content:space-between; align-items:center;">
+          <span style="text-transform:capitalize;">${p.label}</span>
+          <span class="badge badge-gold">${p.count} horários</span>
+        </div>
+      `).join('') : `<div class="card muted small">Sem horários nos próximos 30 dias.</div>`}
+      <a href="#profile-services" class="link" id="calendar-link" style="margin-top:4px;">Selecione um serviço para ver o calendário →</a>
+    </div>
+
+    <div class="section-title"><h2>Avaliações</h2></div>
+    <div style="display:flex; flex-direction:column; gap:10px;">
+      ${reviews.map(r => `
+        <div class="card">
+          <div style="display:flex; justify-content:space-between;">
+            <strong style="font-size:14px;">${escapeHTML(r.name)}</strong>
+            <span class="stars" style="font-size:13px;">${starIcons(r.rating)}</span>
+          </div>
+          <p class="review-comment">${escapeHTML(r.text)}</p>
+        </div>
+      `).join('')}
+    </div>
+  `;
+
+  function updateServiceActions() {
+    const services = barber.services.filter(item => selectedServiceIds.includes(item.id));
+    const hasServices = services.length > 0;
+    const summary = document.getElementById('selected-service-summary');
+    const total = services.reduce((sum, service) => sum + service.price, 0);
+    const minutes = services.reduce((sum, service) => sum + service.durationMin, 0);
+    document.getElementById('selected-service-name').textContent = `${services.length} serviço(s) · ${minutes} min`;
+    document.getElementById('selected-service-total').textContent = formatBRL(total);
+    summary.style.display = hasServices ? 'flex' : 'none';
+
+    const query = new URLSearchParams({
+      barbeiro: barber.id,
+      servicos: selectedServiceIds.join(','),
+      servico: selectedServiceIds[0] || ''
+    }).toString();
+
+    agendarBtn.href = hasServices ? `agendar.html?${query}` : '#';
+    agendarBtn.style.opacity = hasServices ? '1' : '.45';
+    agendarBtn.style.pointerEvents = hasServices ? 'auto' : 'none';
+    agendarBtn.setAttribute('aria-disabled', hasServices ? 'false' : 'true');
+
+    const calendarLink = document.getElementById('calendar-link');
+    calendarLink.href = hasServices ? agendarBtn.href : '#profile-services';
+    calendarLink.textContent = hasServices ? 'Ver calendário completo →' : 'Selecione ao menos um serviço para ver o calendário →';
+  }
+
+  function toggleService(row) {
+    const id = row.dataset.serviceId;
+    const index = selectedServiceIds.indexOf(id);
+    if (index === -1) selectedServiceIds.push(id); else selectedServiceIds.splice(index, 1);
+    const selected = selectedServiceIds.includes(id);
+    row.classList.toggle('selected', selected);
+    row.setAttribute('aria-checked', selected ? 'true' : 'false');
+    updateServiceActions();
+  }
+
+  document.querySelectorAll('#profile-services .svc-row').forEach(row => {
+    row.addEventListener('click', () => toggleService(row));
+    row.addEventListener('keydown', event => {
+      if (event.key === 'Enter' || event.key === ' ') {
+        event.preventDefault();
+        toggleService(row);
+      }
+    });
+  });
+  document.querySelectorAll('.profile-post img').forEach(img => img.addEventListener('click', () => openPostViewer(img.src, img.alt)));
+</script>
+</body>
+</html>

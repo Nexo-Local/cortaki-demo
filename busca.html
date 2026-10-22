@@ -1,0 +1,154 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Buscar — Navalha</title>
+<link rel="stylesheet" href="assets/css/style.css">
+</head>
+<body>
+<div class="app-shell">
+  <div id="topbar"></div>
+  <div class="page">
+    <div class="search-input-wrap">
+      <span class="search-symbol"><svg class="app-icon"><use href="assets/icons/app-icons.svg#search"></use></svg></span>
+      <input class="search-input" id="search-input" type="search" placeholder="Busque barbeiros, serviços ou barbearias" autocomplete="off">
+      <button class="search-clear" id="search-clear" type="button" aria-label="Limpar busca">✕</button>
+    </div>
+    <div style="margin-bottom: 4px;">
+      <span class="badge badge-muted icon-label"><svg class="app-icon"><use href="assets/icons/app-icons.svg#pin"></use></svg> Localização aproximada</span>
+    </div>
+
+    <div class="section-title" style="margin-top: 14px;">
+      <h2 style="font-size:16px;">Filtros</h2>
+      <span class="link" id="clear-filters" style="cursor:pointer;">Limpar</span>
+    </div>
+
+    <div class="field">
+      <label>Serviço</label>
+      <select id="filter-service">
+        <option value="">Todos os serviços</option>
+      </select>
+    </div>
+
+    <div class="chip-group" id="filter-type" style="margin-bottom: 14px;">
+      <div class="chip" data-value="">Qualquer</div>
+      <div class="chip icon-label" data-value="domicilio"><svg class="app-icon"><use href="assets/icons/app-icons.svg#home"></use></svg> A domicílio</div>
+      <div class="chip icon-label" data-value="barbearia"><svg class="app-icon"><use href="assets/icons/app-icons.svg#shop"></use></svg> Na barbearia</div>
+    </div>
+
+    <div class="field">
+      <label>Ordenar por</label>
+      <select id="filter-sort">
+        <option value="distance">Mais próximos</option>
+        <option value="rating">Melhor avaliação</option>
+        <option value="price">Menor preço</option>
+      </select>
+    </div>
+
+    <div class="section-title">
+      <h2 id="result-count" style="font-size:16px;"></h2>
+    </div>
+    <div id="results" style="display:flex; flex-direction:column; gap: 12px;"></div>
+  </div>
+
+</div>
+
+<script src="assets/js/mock-data.js"></script>
+<script src="assets/js/app.js"></script>
+<script>
+  renderTopbar({ title: 'Buscar profissionais' });
+  renderBottomNav('busca');
+
+  const serviceSelect = document.getElementById('filter-service');
+  SERVICE_CATALOG.forEach((s) => {
+    const opt = document.createElement('option');
+    opt.value = s.id;
+    opt.textContent = `${s.icon} ${s.name}`;
+    serviceSelect.appendChild(opt);
+  });
+
+  let state = { query: (qs('q') || '').trim().toLowerCase(), service: '', type: qs('tipo') || '', sort: 'distance' };
+  const searchInput = document.getElementById('search-input');
+  searchInput.value = state.query;
+  if (state.type) {
+    document.querySelectorAll('#filter-type .chip').forEach((c) => {
+      c.classList.toggle('selected', c.dataset.value === state.type);
+    });
+  } else {
+    document.querySelector('#filter-type .chip[data-value=""]').classList.add('selected');
+  }
+
+  document.querySelectorAll('#filter-type .chip').forEach((chip) => {
+    chip.addEventListener('click', () => {
+      document.querySelectorAll('#filter-type .chip').forEach((c) => c.classList.remove('selected'));
+      chip.classList.add('selected');
+      state.type = chip.dataset.value;
+      render();
+    });
+  });
+  serviceSelect.addEventListener('change', (e) => { state.service = e.target.value; render(); });
+  searchInput.addEventListener('input', (e) => { state.query = e.target.value.trim().toLowerCase(); render(); });
+  document.getElementById('search-clear').addEventListener('click', () => { searchInput.value = ''; state.query = ''; searchInput.focus(); render(); });
+  document.getElementById('filter-sort').addEventListener('change', (e) => { state.sort = e.target.value; render(); });
+  document.getElementById('clear-filters').addEventListener('click', () => {
+    state = { query: '', service: '', type: '', sort: 'distance' };
+    searchInput.value = '';
+    serviceSelect.value = '';
+    document.getElementById('filter-sort').value = 'distance';
+    document.querySelectorAll('#filter-type .chip').forEach((c) => c.classList.toggle('selected', c.dataset.value === ''));
+    render();
+  });
+
+  function nextAvailableSlot(barber) {
+    const today = new Date();
+    for (let i = 0; i < 14; i++) {
+      const d = new Date(today.getFullYear(), today.getMonth(), today.getDate() + i);
+      if (dayHasAvailability(barber, d)) {
+        const slot = getDaySlots(barber, d).find(s => s.available);
+        return `${formatDateLabel(d)}, ${slot.time}`;
+      }
+    }
+    return 'Sem horários próximos';
+  }
+
+  function render() {
+    let list = BARBERS.filter((b) => {
+      const shop = b.shopId ? getShopById(b.shopId) : null;
+      const searchable = [b.name, b.bio, shop?.name, shop?.neighborhood, ...b.services.map(service => service.name)].filter(Boolean).join(' ').toLowerCase();
+      if (state.query && !searchable.includes(state.query)) return false;
+      if (state.service && !b.services.some((s) => s.id === state.service)) return false;
+      if (state.type === 'domicilio' && !b.attendsHome) return false;
+      if (state.type === 'barbearia' && !b.attendsShop) return false;
+      return true;
+    });
+    if (state.sort === 'rating') list = [...list].sort((a, b) => b.rating - a.rating);
+    else if (state.sort === 'price') list = [...list].sort((a, b) => a.startingPrice - b.startingPrice);
+    else list = [...list].sort((a, b) => a.distanceKm - b.distanceKm);
+
+    document.getElementById('result-count').textContent = `${list.length} profissionais encontrados`;
+
+    document.getElementById('results').innerHTML = list.length ? list.map((b) => `
+      <a href="barbeiro.html?id=${b.id}" class="card barber-card">
+        <img src="${b.photo}" alt="${b.name}">
+        <div style="flex:1;">
+          <div class="name">${b.name}</div>
+          <div class="rating">${starIcons(b.rating)} <span class="mono">${b.rating}</span> <span style="color:var(--text-muted); font-weight:400;">(${b.reviewCount})</span></div>
+          <div class="services">${b.services.slice(0, 3).map(s => s.name).join(' • ')}</div>
+          <div class="meta">
+            <span class="mono">A partir de ${formatBRL(b.startingPrice)}</span>
+            <span class="icon-label">${appIcon('pin')} ${b.distanceKm} km</span>
+          </div>
+          <div class="meta" style="margin-top:4px;">
+            ${b.attendsHome ? `<span class="badge badge-gold icon-label" style="padding:2px 8px;">${appIcon('home')} Atende a domicílio</span>` : ''}
+            ${b.online ? '<span class="badge badge-success" style="padding:2px 8px;"><span class="badge-dot"></span> Online agora</span>' : `<span class="badge badge-muted" style="padding:2px 8px;">⏱ ${nextAvailableSlot(b)}</span>`}
+          </div>
+        </div>
+      </a>
+    `).join('') : `<div class="empty-state"><div class="icon">🔎</div>Nenhum profissional encontrado com esses filtros.</div>`;
+  }
+
+  render();
+</script>
+</body>
+</html>

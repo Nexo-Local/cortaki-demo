@@ -1,0 +1,587 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Chamar barbeiro — Navalha</title>
+<link rel="stylesheet" href="assets/css/style.css">
+</head>
+<body>
+<div class="app-shell has-booking-footer">
+  <div id="topbar"></div>
+
+  <div class="page">
+    <div style="display:flex; gap:6px; margin-bottom: 18px;" id="stepper"></div>
+    <div id="step-content"></div>
+  </div>
+
+  <div class="booking-footer" id="footer-bar">
+    <button class="btn btn-secondary" id="btn-back" style="flex:0 0 auto;">Voltar</button>
+    <button class="btn btn-primary btn-block" id="btn-next">Continuar</button>
+  </div>
+</div>
+
+<script src="assets/js/mock-data.js"></script>
+<script src="assets/js/app.js"></script>
+<script>
+  const preselected = qs('barbeiro') ? getBarberById(qs('barbeiro')) : null;
+  renderTopbar({ title: 'Chamar um barbeiro' });
+
+  const STORAGE_KEYS = {
+    addresses: 'navalha_customer_addresses',
+    balance: 'navalha_customer_balance',
+    appointments: 'navalha_appointments',
+    notifications: 'navalha_customer_notifications'
+  };
+
+  function generateSecurityCode() {
+    return String(Math.floor(100000 + Math.random() * 900000));
+  }
+
+  function saveAppointment(appointment) {
+    let appointments = [];
+    try { appointments = JSON.parse(localStorage.getItem(STORAGE_KEYS.appointments) || '[]'); } catch {}
+    if (!Array.isArray(appointments)) appointments = [];
+    appointments.push(appointment);
+    localStorage.setItem(STORAGE_KEYS.appointments, JSON.stringify(appointments));
+  }
+
+  function addCustomerNotification(message, type, appointmentId) {
+    let notifications = [];
+    try { notifications = JSON.parse(localStorage.getItem(STORAGE_KEYS.notifications) || '[]'); } catch {}
+    if (!Array.isArray(notifications)) notifications = [];
+    notifications.unshift({ id: `notice-${Date.now()}`, customerId: DEMO_USERS.customer.id, appointmentId, type, message, createdAt: new Date().toISOString(), read: false });
+    localStorage.setItem(STORAGE_KEYS.notifications, JSON.stringify(notifications));
+  }
+
+  function getSavedAddresses() {
+    const saved = localStorage.getItem(STORAGE_KEYS.addresses);
+    if (saved) {
+      try {
+        const parsed = JSON.parse(saved);
+        if (Array.isArray(parsed) && parsed.length) return parsed;
+      } catch {}
+    }
+
+    return DEMO_USERS.customer.address ? [{
+      label: 'Principal',
+      text: DEMO_USERS.customer.address,
+      complement: ''
+    }] : [];
+  }
+
+  function getBalance() {
+    return Number(localStorage.getItem(STORAGE_KEYS.balance) || 0);
+  }
+
+  function saveBalance(value) {
+    localStorage.setItem(STORAGE_KEYS.balance, String(Math.max(0, value)));
+  }
+
+  function fullAddress(address) {
+    return [address.text, address.complement].filter(Boolean).join(' — ');
+  }
+
+  const STEPS = ['Serviços', 'Local', 'Barbeiro', 'Pagamento'];
+  let step = 0;
+  let isSearchingBarbers = false;
+  const SEARCH_WINDOW_MS = 5 * 60 * 1000;
+  let searchStartedAt = 0, searchRefreshTimer = null;
+  let serviceSearch = '';
+  const requestedServiceId = qs('servico');
+  let draft = {
+    serviceIds: requestedServiceId ? [requestedServiceId] : [], address: DEMO_USERS.customer.address ? '' : '',
+    payMethod: null, mode: 'chamada', type: 'domicilio', hairPhoto: '',
+    barberId: preselected?.id || null,
+  };
+
+  // catálogo disponível: se veio de um perfil específico, só os serviços dele;
+  // senão, união dos serviços oferecidos por barbeiros online que atendem em domicílio
+  const onlineHomeBarbers = BARBERS.filter(b => b.online && b.attendsHome);
+  const catalog = preselected ? preselected.services : (() => {
+    const ids = new Set();
+    onlineHomeBarbers.forEach(b => b.services.forEach(s => ids.add(s.id)));
+    return SERVICE_CATALOG.filter(s => ids.has(s.id));
+  })();
+
+  // Só mantém a seleção recebida se o serviço realmente pertencer ao barbeiro.
+  draft.serviceIds = draft.serviceIds.filter(id => catalog.some(service => service.id === id));
+
+  function selectedServices() { return catalog.filter(s => draft.serviceIds.includes(s.id)); }
+  function selectedBarber() { return BARBERS.find(barber => barber.id === draft.barberId) || (preselected?.id === draft.barberId ? preselected : null); }
+  function selectedBarberServices() {
+    const barber = selectedBarber();
+    return barber ? barber.services.filter(service => draft.serviceIds.includes(service.id)) : [];
+  }
+  function normalizeSearch(value) {
+    return String(value || '')
+      .normalize('NFD')
+      .replace(/[\u0300-\u036f]/g, '')
+      .toLowerCase()
+      .trim();
+  }
+
+  function filteredServices() {
+    const term = normalizeSearch(serviceSearch);
+    if (!term) return catalog;
+    return catalog.filter(service => normalizeSearch(`${service.name} ${service.durationMin} min`).includes(term));
+  }
+
+  function recommendedBarbers() {
+    if (preselected) return [preselected];
+
+    if (!serviceSearch && !draft.serviceIds.length) return [];
+
+    return onlineHomeBarbers
+      .filter(barber => {
+        const offeredIds = barber.services.map(service => service.id);
+        if (draft.serviceIds.length) {
+          return draft.serviceIds.every(id => offeredIds.includes(id));
+        }
+        return filteredServices().some(service => offeredIds.includes(service.id));
+      })
+      .sort((a, b) => {
+        if (b.rating !== a.rating) return b.rating - a.rating;
+        return a.distanceKm - b.distanceKm;
+      })
+      .slice(0, 3);
+  }
+  function totalPrice() {
+    const barber = selectedBarber();
+    return barber ? barberPrice(barber) : 0;
+  }
+
+  function renderStepper() {
+    document.getElementById('stepper').innerHTML = STEPS.map((label, i) => `
+      <div style="flex:1; height:4px; border-radius:4px; background:${i <= step ? 'var(--gold)' : 'var(--border)'};"></div>
+    `).join('');
+  }
+
+  function renderStep() {
+    renderStepper();
+    const el = document.getElementById('step-content');
+    document.getElementById('btn-back').style.visibility = step === 0 ? 'hidden' : 'visible';
+    document.getElementById('btn-next').textContent = ['Continuar', 'Buscar barbeiros', 'Continuar para pagamento', 'Pagar e chamar'][step];
+
+    if (step === 0) {
+      const visibleServices = filteredServices();
+      const barberSuggestions = recommendedBarbers();
+      el.innerHTML = `
+        ${preselected ? `<div class="card" style="display:flex; gap:10px; align-items:center; margin-bottom:16px;"><img src="${preselected.photo}" style="width:40px; height:40px; border-radius:10px;"><div><div style="font-weight:600; font-size:13.5px;">${preselected.name}</div><div class="small muted">Chamando este barbeiro diretamente</div></div></div>` : ''}
+        <h2 style="margin-bottom:4px;">Escolha os serviços</h2>
+        <p class="small muted" style="margin-bottom:14px;">Pesquise e marque o que precisa — mostraremos os barbeiros ideais.</p>
+        <div class="field" style="margin-bottom:14px;">
+          <label for="service-search">Pesquisar serviço</label>
+          <div style="position:relative;">
+            <span style="position:absolute; left:13px; top:50%; transform:translateY(-50%); pointer-events:none;">${appIcon('search')}</span>
+            <input
+              type="search"
+              id="service-search"
+              placeholder="Ex: corte, barba, pezinho..."
+              value="${serviceSearch.replace(/&/g, '&amp;').replace(/"/g, '&quot;')}"
+              autocomplete="off"
+              style="padding-left:42px;"
+            >
+          </div>
+        </div>
+        <div class="svc-list" id="svc-list">
+          ${visibleServices.map(s => `
+            <div class="svc-row ${draft.serviceIds.includes(s.id) ? 'selected' : ''}" data-id="${s.id}">
+              <div class="box">${appIcon('check')}</div>
+              <div class="info">
+                <div class="n icon-label">${appIcon(s.icon)} ${s.name}</div>
+                <div class="d">${s.durationMin} min</div>
+              </div>
+              
+            </div>
+          `).join('') || `<div class="empty-state" style="padding:24px 12px;"><div class="icon">${appIcon('search','app-icon-lg')}</div>Nenhum serviço encontrado.<br><span class="small muted">Tente pesquisar com outro nome.</span></div>`}
+        </div>
+        <div class="svc-total" id="svc-total" style="display:${draft.serviceIds.length ? 'flex' : 'none'};">
+          <span class="muted">${draft.serviceIds.length} serviço(s) selecionado(s)</span>
+        </div>
+        ${(draft.serviceIds.length || serviceSearch) ? `
+          <div style="margin-top:20px;">
+            <h3 style="font-size:15px; margin-bottom:4px;">Barbeiros indicados</h3>
+            <p class="small muted" style="margin-bottom:12px;">Profissionais online que atendem todos os serviços solicitados.</p>
+            <div style="display:grid; gap:10px;">
+              ${barberSuggestions.length ? barberSuggestions.map(barber => `
+                <div class="card" style="display:flex; align-items:center; gap:11px; padding:12px;">
+                  <img src="${barber.photo}" alt="${barber.name}" style="width:46px; height:46px; border-radius:12px; object-fit:cover;">
+                  <div style="flex:1; min-width:0;">
+                    <div style="font-weight:700; font-size:14px;">${barber.name}</div>
+                    <div class="small" style="color:var(--gold-bright);">${starString(barber.rating)} <span class="mono">${barber.rating}</span></div>
+                    <div class="small muted icon-label">${appIcon('pin')} ${barber.distanceKm} km • atende em domicílio</div>
+                  </div>
+                  <span class="badge badge-success" style="white-space:nowrap;"><span class="badge-dot"></span> Online</span>
+                </div>
+              `).join('') : `
+                <div class="card small muted" style="text-align:center; padding:18px;">
+                  Nenhum barbeiro online atende essa combinação no momento.
+                </div>
+              `}
+            </div>
+          </div>
+        ` : ''}
+      `;
+      const searchInput = document.getElementById('service-search');
+      searchInput.addEventListener('input', (event) => {
+        serviceSearch = event.target.value;
+        renderStep();
+        const refreshedInput = document.getElementById('service-search');
+        refreshedInput.focus();
+        refreshedInput.setSelectionRange(serviceSearch.length, serviceSearch.length);
+      });
+      document.querySelectorAll('#svc-list .svc-row').forEach((row) => {
+        row.addEventListener('click', () => {
+          const id = row.dataset.id;
+          const idx = draft.serviceIds.indexOf(id);
+          if (idx === -1) draft.serviceIds.push(id); else draft.serviceIds.splice(idx, 1);
+          draft.barberId = preselected?.id || null;
+          draft.payMethod = null;
+          renderStep();
+        });
+      });
+    } 
+
+    if (step === 1) {
+      const savedAddresses = getSavedAddresses();
+
+      el.innerHTML = `
+        <h2 style="margin-bottom:4px;">Para onde o barbeiro vai?</h2>
+        <p class="small muted" style="margin-bottom:14px;">Escolha um endereço salvo ou digite outro local.</p>
+
+        ${savedAddresses.length ? `
+          <div class="chip-group" id="saved-addresses" style="margin-bottom:14px;">
+            ${savedAddresses.map((address, index) => {
+              const value = fullAddress(address);
+              return `<div class="chip ${draft.address === value ? 'selected' : ''}" data-index="${index}">
+                ${appIcon('pin')} ${address.label || 'Endereço'}
+              </div>`;
+            }).join('')}
+          </div>
+        ` : ''}
+
+        <div class="field">
+          <label>Endereço</label>
+          <input type="text" id="address-input" placeholder="Ex: Rua das Palmeiras, 123 — Centro" value="${draft.address}">
+        </div>
+
+        <div class="card" style="margin-top:16px;">
+          <div style="display:flex; align-items:center; gap:11px;">
+            ${appIcon('camera','app-icon-lg')}
+            <div style="flex:1;">
+              <strong style="font-size:14px;">Foto do cabelo agora</strong>
+              <p class="small muted" style="margin-top:3px;">Obrigatória — registra o estado atual e ajuda o barbeiro a preparar os equipamentos.</p>
+            </div>
+          </div>
+          <label class="btn btn-secondary btn-block" for="hair-photo-input" style="margin-top:12px;">${draft.hairPhoto ? 'Trocar foto' : 'Enviar uma foto'}</label>
+          <input id="hair-photo-input" type="file" accept="image/*" capture="environment" required hidden>
+          ${draft.hairPhoto ? `<img src="${draft.hairPhoto}" class="request-photo-preview" alt="Foto atual do cabelo"><button class="btn btn-ghost btn-sm" id="remove-hair-photo" type="button" style="margin-top:7px;">Remover foto</button>` : ''}
+        </div>
+
+        <p class="small muted" style="margin-top:14px;">Localização aproximada — sem integração de mapas nesta versão.</p>
+      `;
+
+      document.getElementById('address-input').addEventListener('input', (e) => {
+        draft.address = e.target.value;
+        document.querySelectorAll('#saved-addresses .chip').forEach(c => c.classList.remove('selected'));
+      });
+
+      document.getElementById('hair-photo-input').addEventListener('change', async (event) => {
+        try {
+          draft.hairPhoto = await readProfileImage(event.target.files[0]);
+          renderStep();
+        } catch (error) {
+          alert(error.message);
+        }
+      });
+      document.getElementById('remove-hair-photo')?.addEventListener('click', () => {
+        draft.hairPhoto = '';
+        renderStep();
+      });
+
+      document.querySelectorAll('#saved-addresses .chip').forEach((chip) => {
+        chip.addEventListener('click', () => {
+          const address = savedAddresses[Number(chip.dataset.index)];
+          draft.address = fullAddress(address);
+          renderStep();
+        });
+      });
+    }
+
+    if (step === 2) {
+      const candidates = availableBarbers();
+      if (draft.barberId && !candidates.some(barber => barber.id === draft.barberId)) {
+        draft.barberId = null;
+        draft.payMethod = null;
+      }
+      if (!candidates.length) {
+        el.innerHTML = `<div class="empty-state"><div class="icon">😕</div>Nenhum barbeiro disponível agora para esses serviços.<br><button class="btn btn-secondary" id="change-services" type="button" style="margin-top:16px;">Alterar serviços</button></div>`;
+        document.getElementById('change-services').addEventListener('click', () => { step = 0; renderStep(); });
+      } else {
+        renderAvailableBarbers(candidates);
+      }
+    }
+
+    if (step === 3) {
+      renderPaymentStep(el);
+    }
+  }
+
+  function renderBarberSearchLoader() {
+    const el = document.getElementById('step-content');
+    const nextButton = document.getElementById('btn-next');
+    const backButton = document.getElementById('btn-back');
+    const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+    isSearchingBarbers = true;
+    searchStartedAt = Date.now();
+    el.setAttribute('aria-busy', 'true');
+    nextButton.disabled = true;
+    backButton.disabled = true;
+    nextButton.textContent = 'Buscando barbeiros...';
+    el.innerHTML = `
+      <section class="barber-search-state" role="status" aria-live="polite">
+        <div class="barber-search-scene" aria-hidden="true">
+          <img class="barber-search-layer" src="assets/img/cortaki-loader-client.png" alt="">
+          <img class="barber-search-layer barber-search-clipper" src="assets/img/cortaki-loader-clipper.png" alt="">
+          <i class="barber-search-hair hair-one"></i>
+          <i class="barber-search-hair hair-two"></i>
+          <i class="barber-search-hair hair-three"></i>
+        </div>
+        <h2>Localizando barbeiros disponíveis</h2>
+        <p class="small muted">Verificando profissionais próximos que atendem aos serviços escolhidos.</p>
+        <div class="barber-search-dots" aria-hidden="true"><span></span><span></span><span></span></div>
+      </section>
+    `;
+
+    window.setTimeout(() => {
+      isSearchingBarbers = false;
+      step = 2;
+      el.removeAttribute('aria-busy');
+      nextButton.disabled = false;
+      backButton.disabled = false;
+      renderStep();
+      clearInterval(searchRefreshTimer);
+      searchRefreshTimer = setInterval(() => {
+        if (step !== 2 || Date.now() - searchStartedAt >= SEARCH_WINDOW_MS) return clearInterval(searchRefreshTimer);
+        renderStep();
+      }, 10000);
+      window.scrollTo(0, 0);
+    }, reduceMotion ? 450 : 1800);
+  }
+
+  function renderPaymentStep(el) {
+    const barber = selectedBarber();
+    const service = selectedBarberServices();
+    el.innerHTML = `
+      <h2 style="margin-bottom:4px;">Forma de pagamento</h2>
+      <p class="small muted" style="margin-bottom:14px;">Você escolheu ${barber.name}. Confira o valor definido pelo profissional antes de pagar.</p>
+      <div class="card" style="margin-bottom:16px;">
+        <div class="ticket-row"><span class="label">Barbeiro</span><strong>${barber.name}</strong></div>
+        ${service.map(s => `<div class="ticket-row"><span class="label icon-label">${appIcon(s.icon)} ${s.name}</span><span class="mono">${formatBRL(s.price)}</span></div>`).join('')}
+        <hr class="divider">
+        <div class="ticket-row"><span class="label">Valor exato</span><span class="mono price" style="color:var(--gold-bright); font-size:16px;">${formatBRL(totalPrice())}</span></div>
+      </div>
+      <div class="chip-group" id="pay-chips" style="margin-bottom:16px;">
+        <div class="chip icon-label" data-value="Pix">${appIcon('pix')} Pix</div>
+        <div class="chip icon-label" data-value="Cartão">${appIcon('card')} Cartão de crédito</div>
+        <div class="chip icon-label" data-value="Saldo">${appIcon('money')} Saldo</div>
+      </div>
+      <div id="pay-detail"></div>
+    `;
+    document.querySelectorAll('#pay-chips .chip').forEach((chip) => {
+      chip.classList.toggle('selected', chip.dataset.value === draft.payMethod);
+      chip.addEventListener('click', () => {
+        draft.payMethod = chip.dataset.value;
+        document.querySelectorAll('#pay-chips .chip').forEach(c => c.classList.remove('selected'));
+        chip.classList.add('selected');
+        renderPayDetail();
+      });
+    });
+    renderPayDetail();
+    function renderPayDetail() {
+      const box = document.getElementById('pay-detail');
+      if (draft.payMethod === 'Pix') {
+        box.innerHTML = `<div class="card" style="text-align:center;"><div style="font-size:13px; color:var(--text-muted); margin-bottom:8px;">QR Code simulado</div><div style="width:120px; height:120px; margin:0 auto; border-radius:10px; background:repeating-conic-gradient(var(--surface-3) 0% 25%, var(--surface-2) 0% 50%) 0 0/16px 16px;"></div></div>`;
+      } else if (draft.payMethod === 'Cartão') {
+        box.innerHTML = `
+          <div class="field"><label>Número do cartão</label><input type="text" placeholder="0000 0000 0000 0000"></div>
+          <div style="display:flex; gap:10px;">
+            <div class="field" style="flex:1;"><label>Validade</label><input type="text" placeholder="MM/AA"></div>
+            <div class="field" style="flex:1;"><label>CVV</label><input type="text" placeholder="123"></div>
+          </div>
+        `;
+      } else if (draft.payMethod === 'Saldo') {
+        const balance = getBalance();
+        const enough = balance >= totalPrice();
+
+        box.innerHTML = `
+          <div class="card">
+            <div class="ticket-row">
+              <span class="label">Saldo disponível</span>
+              <span class="mono" style="color:${enough ? 'var(--success)' : 'var(--danger)'};">${formatBRL(balance)}</span>
+            </div>
+            <div class="ticket-row">
+              <span class="label">Valor da chamada</span>
+              <span class="mono">${formatBRL(totalPrice())}</span>
+            </div>
+            <hr class="divider">
+            <div class="small" style="color:${enough ? 'var(--success)' : 'var(--danger)'};">
+              ${enough
+                ? `✓ Saldo suficiente. Restará ${formatBRL(balance - totalPrice())}.`
+                : `Saldo insuficiente. Faltam ${formatBRL(totalPrice() - balance)}. Carregue saldo no Perfil.`
+              }
+            </div>
+          </div>
+        `;
+      } else box.innerHTML = '';
+    }
+  }
+
+  function canAdvance() {
+    if (step === 0) return draft.serviceIds.length > 0;
+    if (step === 1) return draft.address.trim().length > 2 && Boolean(draft.hairPhoto);
+    if (step === 2) return Boolean(selectedBarber());
+    if (step === 3) {
+      if (!draft.payMethod) return false;
+      if (draft.payMethod === 'Saldo') return getBalance() >= totalPrice();
+      return true;
+    }
+    return true;
+  }
+
+  document.getElementById('btn-next').addEventListener('click', () => {
+    if (isSearchingBarbers) return;
+    if (!canAdvance()) {
+      if (step === 2) {
+        alert('Escolha um barbeiro disponível para continuar ao pagamento.');
+      } else if (step === 3 && draft.payMethod === 'Saldo' && getBalance() < totalPrice()) {
+        alert('Saldo insuficiente. Carregue saldo no seu perfil ou escolha outra forma de pagamento.');
+      } else {
+        alert(step === 1 && !draft.hairPhoto ? 'Envie uma foto atual do cabelo para continuar.' : 'Preencha esta etapa para continuar.');
+      }
+      return;
+    }
+    if (step === STEPS.length - 1) {
+      confirmBarber(draft.barberId);
+      return;
+    }
+    if (step === 1) {
+      renderBarberSearchLoader();
+      return;
+    }
+    step++;
+    renderStep();
+    window.scrollTo(0, 0);
+  });
+
+  document.getElementById('btn-back').addEventListener('click', () => {
+    if (step === 0 || isSearchingBarbers) return;
+    step--;
+    renderStep();
+  });
+
+  function barberPrice(barber) {
+    return barber.services
+      .filter(service => draft.serviceIds.includes(service.id))
+      .reduce((sum, service) => sum + service.price, 0);
+  }
+
+  function availableBarbers() {
+    const pool = preselected ? [preselected] : BARBERS;
+    return pool.filter(barber => {
+      const storedOnline = localStorage.getItem(`cortaki_barber_chamar_online_${barber.id}`);
+      if (!((storedOnline === null ? barber.online : storedOnline === 'true')) || !barber.attendsHome) return false;
+      const offeredIds = barber.services.map(service => service.id);
+      return draft.serviceIds.every(id => offeredIds.includes(id));
+    }).sort((a, b) => b.rating - a.rating || a.distanceKm - b.distanceKm);
+  }
+
+  function renderAvailableBarbers(candidates) {
+    const el = document.getElementById('step-content');
+    el.innerHTML = `
+      <div style="margin-bottom:17px;">
+        <span class="badge badge-success"><span class="badge-dot"></span> ${candidates.length} disponível(is)</span>
+        <h2 style="font-size:19px; margin-top:10px;">Escolha seu barbeiro</h2>
+        <p class="small muted" style="margin-top:5px;">Compare avaliação, distância, preço e trabalhos antes de confirmar.</p>
+      </div>
+      <div style="display:flex; flex-direction:column; gap:12px;">
+        ${candidates.map(barber => {
+          const catalogItems = safeStoredJSON(`cortaki_barber_catalog_${barber.id}`, []).slice(0, 3);
+          const eta = Math.round(barber.distanceKm * 4 + 5);
+          return `
+            <div class="card available-barber-card ${draft.barberId === barber.id ? 'selected' : ''}" style="${draft.barberId === barber.id ? 'border-color:var(--gold);' : ''}">
+              <div class="available-barber-head">
+                <img src="${barber.photo}" alt="${barber.name}">
+                <div style="flex:1; min-width:0;">
+                  <strong style="font-size:15px;">${barber.name}</strong>
+                  <div class="rating">${starString(barber.rating)} <span class="mono">${barber.rating}</span> <span class="small muted">(${barber.reviewCount})</span></div>
+                  <div class="small muted icon-label" style="margin-top:3px;">${appIcon('pin')} ${barber.distanceKm} km · cerca de ${eta} min</div>
+                </div>
+                <strong class="mono" style="color:var(--gold-bright);">${formatBRL(barberPrice(barber))}</strong>
+              </div>
+              ${catalogItems.length ? `<div class="catalog-preview-row">${catalogItems.map(item => `<img src="${item.image}" alt="${item.caption || 'Trabalho do barbeiro'}">`).join('')}</div>` : `<div class="small muted" style="margin-top:10px;">Catálogo ainda sem fotos.</div>`}
+              <div style="display:flex; gap:8px; margin-top:12px;">
+                <a class="btn btn-secondary btn-sm" href="barbeiro.html?id=${barber.id}" target="_blank" style="flex:1;">Ver perfil e catálogo</a>
+                <button class="btn ${draft.barberId === barber.id ? 'btn-secondary' : 'btn-primary'} btn-sm" data-select-barber="${barber.id}" style="flex:1;">${draft.barberId === barber.id ? '✓ Selecionado' : 'Escolher'}</button>
+              </div>
+            </div>
+          `;
+        }).join('')}
+      </div>
+    `;
+    document.querySelectorAll('[data-select-barber]').forEach(button => {
+      button.addEventListener('click', () => {
+        draft.barberId = button.dataset.selectBarber;
+        draft.payMethod = null;
+        renderStep();
+      });
+    });
+  }
+
+  function confirmBarber(barberId) {
+    const barber = BARBERS.find(item => item.id === barberId) || preselected;
+    if (!barber) return;
+    const finalPrice = barberPrice(barber);
+    if (draft.payMethod === 'Saldo') {
+      const currentBalance = getBalance();
+      if (currentBalance < finalPrice) {
+        alert(`Saldo insuficiente para pagar este atendimento. Faltam ${formatBRL(finalPrice - currentBalance)}.`);
+        return;
+      }
+      saveBalance(currentBalance - finalPrice);
+    }
+    const services = barber.services.filter(service => draft.serviceIds.includes(service.id));
+    const eta = Math.round(barber.distanceKm * 4 + 5);
+    const now = new Date();
+    const appointment = {
+      id: `apt-${Date.now()}`,
+      customerId: DEMO_USERS.customer.id,
+      customerName: localStorage.getItem('navalha_customer_name') || DEMO_USERS.customer.name,
+      barberId: barber.id,
+      barberName: barber.name,
+      serviceNames: services.map(service => service.name),
+      type: 'domicilio', address: draft.address,
+      customerHairPhoto: draft.hairPhoto || null,
+      preparationNote: draft.hairPhoto ? 'Cliente enviou uma foto atual do cabelo para preparo dos equipamentos.' : '',
+      date: now.toLocaleDateString('pt-BR'), dateKey: dateKey(now),
+      time: now.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' }),
+      price: finalPrice, mode: 'chamada', status: 'Confirmado',
+      securityCode: generateSecurityCode(), securityVerified: false,
+      settlement: { status: 'Retido', barberAmount: 0, customerRefund: 0 },
+      payment: { method: draft.payMethod, status: 'Pago e retido' }, createdAt: now.toISOString()
+    };
+    saveAppointment(appointment);
+    addCustomerNotification(`Você escolheu ${barber.name}. Pagamento de ${formatBRL(finalPrice)} confirmado e protegido.`, 'payment-confirmed', appointment.id);
+    BookingDraft.set({ barberId: barber.id, barberName: barber.name, serviceNames: services.map(service => service.name), totalPrice: finalPrice, type: 'domicilio', address: draft.address, customerHairPhoto: draft.hairPhoto || null, payMethod: draft.payMethod, mode: 'chamada', eta, dayLabel: 'Hoje', time: appointment.time, appointmentId: appointment.id, securityCode: appointment.securityCode });
+    document.body.classList.add('ui-page-exit');
+    setTimeout(() => {
+      window.location.href = `atendimento.html?id=${appointment.id}`;
+    }, window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 0 : 145);
+  }
+
+  renderStep();
+</script>
+</body>
+</html>
